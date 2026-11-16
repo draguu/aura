@@ -2965,6 +2965,136 @@ textarea.form-control {
   }
 }
 
+/* Edit quote panel */
+.pp-split td.ed {
+  color: var(--accent-color);
+}
+
+.pp-qedit {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+}
+
+.pp-qedit > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pp-qedit > summary::-webkit-details-marker {
+  display: none;
+}
+
+.pp-qedit[open] .pp-chev {
+  transform: rotate(180deg);
+}
+
+.pp-qedit-body {
+  padding: 0 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.pp-qedit-body > .btn {
+  align-self: flex-start;
+}
+
+.pp-qedit .form-control {
+  background-color: var(--bg-secondary);
+}
+
+.pp-qgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pp-qhead {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.pp-qrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pp-qrow > span {
+  min-width: 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pp-qrow .form-control {
+  width: 150px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.pp-qitem {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--bg-secondary);
+}
+
+.pp-qitem .form-control {
+  background-color: var(--bg-primary);
+}
+
+.pp-qitem-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pp-qitem-top .form-control {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 580px) {
+  .pp-qrow .form-control {
+    width: 130px;
+  }
+
+  .pp-qitem .pp-two {
+    grid-template-columns: 1fr;
+  }
+}
+
+.pp-qrow .form-control::placeholder {
+  font-size: 0.8rem;
+}
+
+@media (max-width: 580px) {
+  .pp-qrow .form-control {
+    width: 52%;
+    max-width: 170px;
+    padding: 0 10px;
+  }
+
+  .pp-qrow .form-control::placeholder {
+    font-size: 13px;
+  }
+}
+
 </style>
 </head>
 <body>
@@ -5251,6 +5381,10 @@ function defaults() {
     clientAudioMarkupPct: 10,
     clientSalaryCapPct: 50,
     proposalMode: 'normal',
+    quoteLines: {},
+    quoteSalaries: {},
+    quoteRoles: [],
+    quoteExtras: [],
     toggleCommission: false,
     commissionPct: 0
   };
@@ -5291,6 +5425,30 @@ function normalize(src) {
   if (!MODES.includes(p.musicMode)) p.musicMode = 'fixed';
   if (!MODES.includes(p.sfxMode)) p.sfxMode = 'fixed';
   if (p.proposalMode !== 'detailed') p.proposalMode = 'normal';
+
+  // Quote edits
+  const numMap = src => {
+    const outMap = {};
+    if (src && typeof src === 'object' && !Array.isArray(src)) {
+      Object.keys(src).forEach(k => { const n = parseFloat(src[k]); if (isFinite(n) && n >= 0) outMap[k] = n; });
+    }
+    return outMap;
+  };
+  p.quoteLines = numMap(b.quoteLines);
+  p.quoteSalaries = numMap(b.quoteSalaries);
+  p.quoteRoles = (Array.isArray(b.quoteRoles) ? b.quoteRoles : []).filter(Boolean).map(r => ({
+    id: r.id || newMemberId(),
+    role: String(r.role || ''),
+    count: Math.max(1, parseInt(r.count) || 1),
+    salary: Math.max(0, parseFloat(r.salary) || 0),
+    months: Math.max(1, parseInt(r.months) || 1)
+  }));
+  p.quoteExtras = (Array.isArray(b.quoteExtras) ? b.quoteExtras : []).filter(Boolean).map(x => ({
+    id: x.id || newMemberId(),
+    name: String(x.name || ''),
+    note: String(x.note || ''),
+    amount: Math.max(0, parseFloat(x.amount) || 0)
+  }));
 
   // Work week: the old on/off switch meant "use Mon–Fri" when off
   if (b.toggleWorkWeek === false || !WORK_WEEK[p.workWeek]) p.workWeek = b.toggleWorkWeek === false ? 'mon-fri' : 'mon-sat';
@@ -5386,15 +5544,16 @@ function audioLine(on, mode, fixed, perMin, perEp, totalMins, epCount) {
  * profit line of exactly the chosen size (a markup on the shown costs: 30%
  * means profit is 30% of the subtotal above it).
  *
- * The rest of the real profit is placed so the quote looks natural:
+ * Anything the user typed in "Edit quote" is used as is: line amounts,
+ * salaries, extra team roles and extra items. Everything else is automatic:
  *   1. Audio: a small markup (clientAudioMarkupPct)
  *   2. Salaries (except founders) and studio overhead rise by the same
  *      factor, at most clientSalaryCapPct. Salaries are round figures.
- *   3. If there is more, a Project Coordinator and a QC team are added to
- *      the team, at round, believable salaries.
- *   4. Studio overhead takes whatever is left, so the profit line always
- *      lands exactly on the chosen percentage.
- * Founder salaries, AI and IP charges always stay at their real cost.
+ *   3. If there is more, a Project Coordinator and a QC team are added.
+ *   4. Studio overhead takes whatever is left, so the profit line lands
+ *      exactly on the chosen percentage. If the user fixed the overhead
+ *      amount, the profit line takes the difference instead.
+ * Founder salaries, AI and IP charges stay at real cost unless edited.
  */
 const splitPlural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const isFounder = role => /founder/i.test(role || '');
@@ -5402,16 +5561,37 @@ const isFounder = role => /founder/i.test(role || '');
 const roundSalary = v => (v >= 100000 ? Math.floor(v / 5000) * 5000 : Math.floor(v / 1000) * 1000);
 const COORDINATOR_SALARY = 40000;
 const QC_SALARY = { min: 25000, base: 30000, max: 45000 };
+const QUOTE_LINES = [
+  { key: 'overhead', label: 'Studio overhead' },
+  { key: 'audio', label: 'Audio' },
+  { key: 'ip', label: 'IP charges' },
+  { key: 'ai', label: 'AI' }
+];
+
+function countQuoteEdits(p) {
+  return Object.keys(p.quoteLines || {}).length + Object.keys(p.quoteSalaries || {}).length +
+    (p.quoteRoles || []).length + (p.quoteExtras || []).length;
+}
 
 function clientSplit(p, t) {
   const askPct = Math.max(0, p.clientProfitPct || 0);
   const total = Math.round(t.sell);
-  const target = Math.round(total / (1 + askPct / 100)); // the subtotal we must hit
+  const target = Math.round(total / (1 + askPct / 100)); // the subtotal we aim for
   const dl = t.dl;
+  const ov = p.quoteLines || {};
+  const has = k => typeof ov[k] === 'number' && ov[k] >= 0;
+  const salOv = p.quoteSalaries || {};
 
-  // AI: at cost, itemised
+  const member = (label, count, mo, salary, cost, edited) => ({
+    label, count, months: mo, salary, cost, edited: !!edited,
+    quote: salary * count * mo,
+    detail: `${count} × ${inrFull(salary)} / month · ${splitPlural(mo, 'month', 'months')}`,
+    short: `${count} × ${inrFull(salary)}/mo × ${mo} mo`
+  });
+
+  // AI: itemised at cost, or scaled to the amount the user typed
   const a = t.ai;
-  const aiItems = [];
+  let aiItems = [];
   const aiItem = (label, detail, usdAmount) => {
     if (usdAmount > 0) {
       const v = Math.round(usdAmount * a.rate);
@@ -5423,89 +5603,111 @@ function clientSplit(p, t) {
   aiItem(`${a.finalTier.label} final`, `${splitPlural(a.finalPasses, 'pass', 'passes')} · ${footage}`, a.finalUsd);
   aiItem('Claude', `${splitPlural(Math.floor(p.aiSubClaudeCount), 'seat', 'seats')} × ${Math.floor(p.aiSubClaudeMonths)} mo`, a.claudeUsd);
   aiItem('ChatGPT', `${splitPlural(Math.floor(p.aiSubChatGptCount), 'seat', 'seats')} × ${Math.floor(p.aiSubChatGptMonths)} mo`, a.chatGptUsd);
-  const aiTotal = aiItems.reduce((s, i) => s + i.quote, 0);
-  const ipQuote = Math.round(t.ip);
+  const aiCost = aiItems.reduce((s, i) => s + i.quote, 0);
+  let aiTotal = aiCost;
+  if (has('ai')) {
+    aiTotal = Math.round(ov.ai);
+    if (aiCost > 0) {
+      let acc = 0;
+      aiItems.forEach((it, idx) => {
+        it.quote = idx === aiItems.length - 1 ? aiTotal - acc : Math.round((it.cost / aiCost) * aiTotal);
+        acc += it.quote;
+      });
+    } else {
+      aiItems = [];
+    }
+  }
 
-  // 1. Audio
-  const room = target - Math.round(t.baseCost); // extra to place (negative if showing more profit than real)
-  const audioQuote = Math.round(t.audio + (room > 0 ? Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, room) : 0));
+  const ipQuote = has('ip') ? Math.round(ov.ip) : Math.round(t.ip);
+  const room = target - Math.round(t.baseCost);
+  const audioQuote = has('audio') ? Math.round(ov.audio)
+    : Math.round(t.audio + (room > 0 ? Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, room) : 0));
 
-  // What team + overhead must add up to
-  const forTeamAndOverhead = target - aiTotal - ipQuote - audioQuote;
+  // Extra items and extra team roles, exactly as typed
+  const extras = (p.quoteExtras || []).filter(x => x.amount > 0).map(x => ({
+    key: 'extra:' + x.id, label: x.name.trim() || 'Additional item', sub: x.note.trim(),
+    cost: 0, quote: Math.round(x.amount), edited: true
+  }));
+  const extrasTotal = extras.reduce((s, x) => s + x.quote, 0);
+  const roles = (p.quoteRoles || []).filter(r => r.salary > 0)
+    .map(r => member(r.role.trim() || 'Team member', r.count, r.months, Math.round(r.salary), 0, true));
+  const rolesTotal = roles.reduce((s, r) => s + r.quote, 0);
 
-  // 2. Salaries and overhead rise (or fall) together
+  // Team members: founders and edited salaries are fixed, the rest scale
   const active = p.toggleTeam ? p.team.filter(m => m.enabled !== false) : [];
   const months = m => memberMonths(p, m);
-  const scalableTeam = active.filter(m => !isFounder(m.role)).reduce((s, m) => s + m.salary * m.count * months(m), 0);
-  const scalable = scalableTeam + t.overheadTotal;
-  const extra = forTeamAndOverhead - t.teamCost - t.overheadTotal;
+  const edited = m => typeof salOv[m.id] === 'number';
+  const fixed = m => isFounder(m.role) || edited(m);
+  const fixedSalary = m => Math.round(edited(m) ? salOv[m.id] : m.salary);
+  const fixedTeam = active.filter(fixed).reduce((s, m) => s + fixedSalary(m) * m.count * months(m), 0);
+  const overheadAuto = !has('overhead');
+  const overheadFixed = overheadAuto ? 0 : Math.round(ov.overhead);
+
+  const forFlex = target - aiTotal - ipQuote - audioQuote - extrasTotal - rolesTotal - fixedTeam - overheadFixed;
+  const scalableTeam = active.filter(m => !fixed(m)).reduce((s, m) => s + m.salary * m.count * months(m), 0);
+  const scalable = scalableTeam + (overheadAuto ? t.overheadTotal : 0);
+  const extra = forFlex - scalable;
   const cap = Math.max(0, p.clientSalaryCapPct || 0) / 100;
   let factor = 1;
   if (scalable > 0) factor = extra >= 0 ? 1 + Math.min(extra / scalable, cap) : Math.max(0, 1 + extra / scalable);
 
-  const member = (label, count, mo, salary, cost) => ({
-    label, count, months: mo, salary, cost,
-    quote: salary * count * mo,
-    detail: `${count} × ${inrFull(salary)} / month · ${splitPlural(mo, 'month', 'months')}`,
-    short: `${count} × ${inrFull(salary)}/mo × ${mo} mo`
-  });
-
   const teamItems = active.map(m => {
     const mo = months(m);
-    let salary = Math.round(m.salary);
-    if (!isFounder(m.role) && factor !== 1) {
+    let salary = fixedSalary(m);
+    if (!fixed(m) && factor !== 1) {
       const scaled = roundSalary(m.salary * factor);
       salary = factor > 1 ? Math.max(salary, scaled) : scaled;
     }
-    return member(m.role, m.count, mo, salary, m.salary * m.count * mo);
-  }).filter(i => i.cost > 0);
+    return Object.assign(member(m.role, m.count, mo, salary, m.salary * m.count * mo, edited(m)), { flex: !fixed(m) });
+  }).filter(i => i.cost > 0 || i.quote > 0);
 
-  // Overhead's share of the rise (it also takes the final remainder below)
-  let overheadPlanned = Math.round(t.overheadTotal * factor);
-  let left = forTeamAndOverhead - teamItems.reduce((s, i) => s + i.quote, 0) - overheadPlanned;
+  const flexTeamQuote = teamItems.filter(i => i.flex).reduce((s, i) => s + i.quote, 0);
+  const overheadPlanned = overheadAuto ? Math.round(t.overheadTotal * factor) : 0;
+  let left = forFlex - flexTeamQuote - overheadPlanned;
 
-  // 3. Project Coordinator and QC team for what is still left
+  // Project Coordinator and QC team for what is still left
   const added = [];
-  if (left > 0) {
-    const hasCoordinator = active.some(m => /coordinator/i.test(m.role));
-    if (!hasCoordinator) {
-      const salary = Math.min(COORDINATOR_SALARY, roundSalary(left / dl));
-      if (salary >= 20000) {
-        added.push(member('Project Coordinator', 1, dl, salary, 0));
-        left -= salary * dl;
-      }
+  const allRoles = active.map(m => m.role).concat(roles.map(r => r.label));
+  if (left > 0 && !allRoles.some(r => /coordinator/i.test(r))) {
+    const salary = Math.min(COORDINATOR_SALARY, roundSalary(left / dl));
+    if (salary >= 20000) {
+      added.push(member('Project Coordinator', 1, dl, salary, 0));
+      left -= salary * dl;
     }
   }
-  if (left > 0) {
+  if (left > 0 && !allRoles.some(r => /\bqc\b|quality/i.test(r))) {
     const qcMonths = Math.max(1, dl - (p.togglePreProd ? productionStart(p) - 1 : 0));
     const artists = active.filter(m => !isFounder(m.role)).reduce((s, m) => s + m.count, 0);
     const maxQc = Math.max(2, Math.ceil(artists / 2));
-    let count = Math.max(1, Math.min(maxQc, Math.ceil(left / (QC_SALARY.max * qcMonths))));
-    let salary = roundSalary(left / (count * qcMonths));
-    salary = Math.min(salary, QC_SALARY.max);
+    const count = Math.max(1, Math.min(maxQc, Math.ceil(left / (QC_SALARY.max * qcMonths))));
+    const salary = Math.min(roundSalary(left / (count * qcMonths)), QC_SALARY.max);
     if (salary >= QC_SALARY.min) {
       added.push(member('QC Team', count, qcMonths, salary, 0));
       left -= salary * count * qcMonths;
     }
   }
 
-  // 4. Overhead takes the rest, so the subtotal lands exactly on target
-  const allTeam = teamItems.concat(added);
+  // Overhead takes the rest, unless the user fixed it
+  const allTeam = teamItems.concat(roles, added);
   const teamQuote = allTeam.reduce((s, i) => s + i.quote, 0);
-  const overheadQuote = Math.max(0, forTeamAndOverhead - teamQuote);
+  const overheadQuote = overheadAuto
+    ? Math.max(0, target - aiTotal - ipQuote - audioQuote - extrasTotal - teamQuote)
+    : overheadFixed;
 
   const lines = [
     { key: 'team', label: 'Team', cost: t.teamCost, quote: teamQuote, items: allTeam },
-    { key: 'overhead', label: 'Studio overhead', cost: t.overheadTotal, quote: overheadQuote },
-    { key: 'audio', label: 'Audio', cost: t.audio, quote: audioQuote },
-    { key: 'ip', label: 'IP charges', cost: t.ip, quote: ipQuote },
-    { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems }
-  ].filter(l => l.cost > 0 || l.quote > 0);
+    { key: 'overhead', label: 'Studio overhead', cost: t.overheadTotal, quote: overheadQuote, edited: !overheadAuto },
+    { key: 'audio', label: 'Audio', cost: t.audio, quote: audioQuote, edited: has('audio') },
+    { key: 'ip', label: 'IP charges', cost: t.ip, quote: ipQuote, edited: has('ip') },
+    { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems, edited: has('ai') }
+  ].concat(extras).filter(l => l.cost > 0 || l.quote > 0);
 
   const subtotal = lines.reduce((s, l) => s + l.quote, 0);
   const profit = total - subtotal;
   return {
-    askPct, lines, subtotal, total, profit, added,
+    askPct, lines, subtotal, total, profit, added, overheadAuto,
+    exact: subtotal === target,
+    edits: countQuoteEdits(p),
     showPct: subtotal > 0 ? (profit / subtotal) * 100 : 0,
     salaryRisePct: (factor - 1) * 100,
     hidden: Math.max(0, subtotal - Math.round(t.baseCost)),
@@ -5943,6 +6145,10 @@ function shellHtml() {
         <thead><tr><th>Item</th><th>Your cost</th><th>On quote</th></tr></thead>
         <tbody data-out="splitRows"></tbody>
       </table>
+      <details class="pp-qedit" id="ppQuoteEdit">
+        <summary><span class="pp-row-title">Edit quote</span><span class="pp-sec-sum" data-out="qeditSum"></span>${CHEVRON}</summary>
+        <div class="pp-qedit-body" id="ppQuoteEditBody"></div>
+      </details>
       <div class="pp-note" data-out="splitNote"></div>
     </div>`;
 
@@ -6200,26 +6406,150 @@ function render() {
   const sp = clientSplit(s, t);
   const rowsHtml = sp.lines.map(l => {
     if (!l.items || !l.items.length) {
-      return `<tr><td>${l.label}</td><td>${l.cost > 0 ? inr(l.cost) : '—'}</td><td>${inr(l.quote)}</td></tr>`;
+      return `<tr><td>${esc(l.label)}</td><td>${l.cost > 0 ? inr(l.cost) : '—'}</td><td${l.edited ? ' class="ed"' : ''}>${inr(l.quote)}</td></tr>`;
     }
     const open = !!splitOpen[l.key];
     const head = `<tr class="grp"><td><button type="button" class="pp-split-toggle" data-split="${l.key}" aria-expanded="${open}">` +
       `${l.label}<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button></td>` +
-      `<td>${l.cost > 0 ? inr(l.cost) : '—'}</td><td>${inr(l.quote)}</td></tr>`;
+      `<td>${l.cost > 0 ? inr(l.cost) : '—'}</td><td${l.edited ? ' class="ed"' : ''}>${inr(l.quote)}</td></tr>`;
     const items = open ? l.items.map(i =>
-      `<tr class="item"><td><div>${esc(i.label)}</div><small>${i.short || i.detail}</small></td><td>${i.cost > 0 ? inr(i.cost) : '—'}</td><td>${inr(i.quote)}</td></tr>`).join('') : '';
+      `<tr class="item"><td><div>${esc(i.label)}</div><small>${i.short || i.detail}</small></td><td>${i.cost > 0 ? inr(i.cost) : '—'}</td><td${i.edited ? ' class="ed"' : ''}>${inr(i.quote)}</td></tr>`).join('') : '';
     return head + items;
   }).join('');
   out('splitRows', rowsHtml +
     `<tr class="sub"><td>Subtotal</td><td>${inr(t.baseCost)}</td><td>${inr(sp.subtotal)}</td></tr>` +
     `<tr class="profit"><td>Profit (${pct(Math.round(sp.showPct))})</td><td>${inr(sp.realProfit)}</td><td>${inr(sp.profit)}</td></tr>` +
     `<tr class="total"><td>Total</td><td>${inr(t.sell)}</td><td>${inr(sp.total)}</td></tr>`, true);
-  out('splitNote', t.baseCost <= 0 ? '' : sp.belowCost
-    ? `<span class="warn">This shows more profit than you actually make (${pct(sp.realPct)} on costs), so salaries and overhead are below your real costs on the quote.</span>`
-    : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. ${inr(sp.hidden)} is placed in the quote: salaries up ${pct(Math.round(sp.salaryRisePct))}` +
-      `${sp.added.length ? ', ' + sp.added.map(i => i.label + (i.count > 1 ? ' (' + i.count + ')' : '')).join(' and ') + ' added to the team' : ''}, and the rest in overhead and audio. Founder salary, AI and IP stay at cost.`, true);
+  const editsNote = sp.edits ? ' Amounts you edited are in purple.' : '';
+  out('splitNote', t.baseCost <= 0 && !sp.edits ? '' : !sp.exact
+    ? `<span class="warn">Your edits don't leave room for exactly ${pct(sp.askPct)} profit, so the quote shows ${pct(Math.round(sp.showPct * 10) / 10)}.</span> ` +
+      (sp.overheadAuto ? 'Lower some of the edited amounts to bring it back.' : 'Clear the Studio overhead amount so it can balance the quote.')
+    : sp.belowCost
+      ? `<span class="warn">This shows more profit than you actually make (${pct(sp.realPct)} on costs), so the quote lines add up to less than your real costs.</span>`
+      : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. ${inr(sp.hidden)} is placed in the quote${Math.round(sp.salaryRisePct) > 0 ? ': salaries up ' + pct(Math.round(sp.salaryRisePct)) + ',' : ':'}` +
+        `${sp.added.length ? ' ' + sp.added.map(i => i.label + (i.count > 1 ? ' (' + i.count + ')' : '')).join(' and ') + ' added to the team,' : ''} the rest in ${[sp.overheadAuto ? 'overhead' : '', state.quoteLines.audio === undefined ? 'audio' : ''].filter(Boolean).join(' and ') || 'the profit line'}.${editsNote}`, true);
+  out('qeditSum', sp.edits ? plural(sp.edits, 'edit') : '');
+  refreshQuoteEditor(sp);
 
   queueDraftSave();
+}
+
+// ── EDIT QUOTE PANEL ─────────────────────────────────────────────────────────
+let quoteEditorKey = '';
+const REMOVE_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+function quoteEditorStructure() {
+  const active = state.toggleTeam ? state.team.filter(m => m.enabled !== false) : [];
+  return [
+    active.map(m => m.id + ':' + m.role + ':' + m.count).join(','),
+    state.quoteRoles.map(r => r.id).join(','),
+    state.quoteExtras.map(x => x.id).join(',')
+  ].join('|');
+}
+
+function qInput(attrs, value, extra = '') {
+  return `<input type="number" inputmode="decimal" class="form-control" min="0" step="any" ${attrs} value="${value === undefined || value === null ? '' : esc(value)}" ${extra}>`;
+}
+
+function buildQuoteEditor() {
+  const body = root.querySelector('#ppQuoteEditBody');
+  const active = state.toggleTeam ? state.team.filter(m => m.enabled !== false) : [];
+  const lineRows = QUOTE_LINES.map(l => `
+    <label class="pp-qrow"><span>${l.label}</span>${qInput(`data-q="line" data-key="${l.key}" aria-label="${l.label} on quote"`, state.quoteLines[l.key])}</label>`).join('');
+  const salaryRows = active.length ? active.map(m => `
+    <label class="pp-qrow"><span>${esc(m.role)}${m.count > 1 ? ' × ' + m.count : ''}</span>${qInput(`data-q="sal" data-id="${esc(m.id)}" aria-label="${esc(m.role)} salary per month on quote"`, state.quoteSalaries[m.id])}</label>`).join('')
+    : '<div class="pp-hint">No team members yet.</div>';
+  const roleRows = state.quoteRoles.map(r => `
+    <div class="pp-qitem" data-qid="${esc(r.id)}">
+      <div class="pp-qitem-top">
+        <input type="text" class="form-control" data-q="role" data-field="role" value="${esc(r.role)}" placeholder="Role name" aria-label="Role">
+        <button type="button" class="pp-icon-btn" data-act="q-remove-role" data-id="${esc(r.id)}" aria-label="Remove role">${REMOVE_ICON}</button>
+      </div>
+      <div class="pp-fields pp-fields-3">
+        <label class="pp-field"><span>People</span>${qInput('data-q="role" data-field="count" step="1" min="1"', r.count)}</label>
+        <label class="pp-field"><span>₹ / month</span>${qInput('data-q="role" data-field="salary"', r.salary || '')}</label>
+        <label class="pp-field"><span>Months</span>${qInput('data-q="role" data-field="months" step="1" min="1"', r.months)}</label>
+      </div>
+    </div>`).join('');
+  const extraRows = state.quoteExtras.map(x => `
+    <div class="pp-qitem" data-qid="${esc(x.id)}">
+      <div class="pp-qitem-top">
+        <input type="text" class="form-control" data-q="extra" data-field="name" value="${esc(x.name)}" placeholder="Item name" aria-label="Item name">
+        <button type="button" class="pp-icon-btn" data-act="q-remove-extra" data-id="${esc(x.id)}" aria-label="Remove item">${REMOVE_ICON}</button>
+      </div>
+      <div class="pp-two">
+        <input type="text" class="form-control" data-q="extra" data-field="note" value="${esc(x.note)}" placeholder="Short note (optional)" aria-label="Short note">
+        ${qInput('data-q="extra" data-field="amount" placeholder="Amount (₹)" aria-label="Amount"', x.amount || '')}
+      </div>
+    </div>`).join('');
+
+  body.innerHTML = `
+    <div class="pp-qgroup">
+      <div class="pp-qhead">Line amounts</div>
+      <div class="pp-hint">Leave a box empty to keep the automatic amount shown in it.</div>
+      ${lineRows}
+    </div>
+    <div class="pp-qgroup">
+      <div class="pp-qhead">Salaries on the quote, per month</div>
+      ${salaryRows}
+    </div>
+    <div class="pp-qgroup">
+      <div class="pp-qhead">Extra team roles</div>
+      ${roleRows}
+      <button type="button" class="pp-link" data-act="q-add-role">+ Add team role</button>
+    </div>
+    <div class="pp-qgroup">
+      <div class="pp-qhead">Extra items</div>
+      ${extraRows}
+      <button type="button" class="pp-link" data-act="q-add-extra">+ Add item</button>
+    </div>
+    <button type="button" class="btn btn-secondary btn-sm" data-act="q-reset">Clear all edits</button>`;
+}
+
+// Show the automatic amount in each empty box
+function refreshQuoteEditor(sp) {
+  const key = quoteEditorStructure();
+  if (key !== quoteEditorKey) {
+    quoteEditorKey = key;
+    buildQuoteEditor();
+  }
+  const body = root.querySelector('#ppQuoteEditBody');
+  const byKey = {};
+  sp.lines.forEach(l => { byKey[l.key] = l; });
+  body.querySelectorAll('[data-q="line"]').forEach(el => {
+    const l = byKey[el.dataset.key];
+    el.placeholder = 'Auto ' + inrFull(l ? l.quote : 0);
+  });
+  const team = byKey.team ? byKey.team.items : [];
+  const active = state.toggleTeam ? state.team.filter(m => m.enabled !== false) : [];
+  body.querySelectorAll('[data-q="sal"]').forEach(el => {
+    const idx = active.findIndex(m => String(m.id) === el.dataset.id);
+    const item = team.find(i => i.label === (active[idx] || {}).role);
+    el.placeholder = 'Auto ' + inrFull(item ? item.salary : 0);
+  });
+}
+
+function onQuoteInput(el, committed) {
+  const kind = el.dataset.q;
+  const raw = el.value.trim();
+  const n = parseFloat(raw);
+  if (kind === 'line' || kind === 'sal') {
+    const map = kind === 'line' ? state.quoteLines : state.quoteSalaries;
+    const key = kind === 'line' ? el.dataset.key : el.dataset.id;
+    if (raw === '' || !(n >= 0)) delete map[key];
+    else map[key] = n;
+    if (committed && raw !== '' && !(n >= 0)) el.value = '';
+  } else {
+    const box = el.closest('[data-qid]');
+    const list = kind === 'role' ? state.quoteRoles : state.quoteExtras;
+    const item = box && list.find(x => String(x.id) === box.dataset.qid);
+    if (!item) return;
+    const f = el.dataset.field;
+    if (f === 'role' || f === 'name' || f === 'note') item[f] = el.value;
+    else if (f === 'count' || f === 'months') { if (n >= 1) item[f] = Math.floor(n); if (committed) el.value = item[f]; }
+    else { item[f] = n >= 0 ? n : 0; }
+  }
+  render();
 }
 
 function renderSaved() {
@@ -6258,6 +6588,7 @@ function renderSaved() {
 }
 
 function rebuild() {
+  quoteEditorKey = '';
   buildTeam();
   render();
 }
@@ -6359,6 +6690,8 @@ function onInput(e) {
     render();
   } else if (el.dataset.m) {
     onMember(el, committed);
+  } else if (el.dataset.q) {
+    onQuoteInput(el, committed);
   }
 }
 
@@ -6374,6 +6707,11 @@ function addMember() {
     }, defaultSchedule(state, role)));
   }
   rebuild();
+}
+
+function focusLast(selector) {
+  const list = root.querySelectorAll('#ppQuoteEditBody ' + selector);
+  if (list.length) list[list.length - 1].focus();
 }
 
 function onClick(e) {
@@ -6414,6 +6752,34 @@ function onClick(e) {
   const id = actEl.dataset.id;
   switch (actEl.dataset.act) {
     case 'add-member': addMember(); break;
+    case 'q-add-role':
+      state.quoteRoles.push({ id: newMemberId(), role: '', count: 1, salary: 0, months: state.deadlineMonths });
+      render();
+      focusLast('[data-q="role"][data-field="role"]');
+      break;
+    case 'q-remove-role':
+      state.quoteRoles = state.quoteRoles.filter(r => String(r.id) !== id);
+      render();
+      break;
+    case 'q-add-extra':
+      state.quoteExtras.push({ id: newMemberId(), name: '', note: '', amount: 0 });
+      render();
+      focusLast('[data-q="extra"][data-field="name"]');
+      break;
+    case 'q-remove-extra':
+      state.quoteExtras = state.quoteExtras.filter(x => String(x.id) !== id);
+      render();
+      break;
+    case 'q-reset':
+      if (!countQuoteEdits(state) || !confirm('Clear all quote edits, extra roles and extra items?')) break;
+      state.quoteLines = {};
+      state.quoteSalaries = {};
+      state.quoteRoles = [];
+      state.quoteExtras = [];
+      quoteEditorKey = '';
+      render();
+      toast('Quote edits cleared');
+      break;
     case 'sync-phases': applyDefaultSchedules(); rebuild(); break;
     case 'full-phases':
       state.team.forEach(m => { m.startMonth = 1; m.durationMonths = state.deadlineMonths; });
@@ -6645,7 +7011,7 @@ function clientSheet(t) {
     </div>`;
 
   const section = (l, i) => {
-    const meta = PROPOSAL_LINE[l.key];
+    const meta = PROPOSAL_LINE[l.key] || { title: esc(l.label), sub: esc(l.sub || '') };
     let sub = meta.sub;
     if (detailed && l.key === 'overhead') sub = `Space rent, rented computers and running costs · ${splitPlural(t.dl, 'month', 'months')}`;
     if (detailed && l.key === 'team') {
@@ -6659,7 +7025,7 @@ function clientSheet(t) {
           <div style="flex:0 0 30px;height:30px;border-radius:8px;background:${P.accentSoft};color:${P.accent};font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;">${String(i + 1).padStart(2, '0')}</div>
           <div style="flex:1;">
             <div style="font-size:14.5px;font-weight:700;color:${P.ink};">${meta.title}</div>
-            <div style="font-size:12px;color:${P.muted};margin-top:2px;">${sub}</div>
+            ${sub ? `<div style="font-size:12px;color:${P.muted};margin-top:2px;">${sub}</div>` : ''}
           </div>
           <div style="font-size:15px;font-weight:700;color:${P.ink};font-variant-numeric:tabular-nums;white-space:nowrap;">${inrFull(l.quote)}</div>
         </div>
