@@ -5383,32 +5383,31 @@ function audioLine(on, mode, fixed, perMin, perEp, totalMins, epCount) {
 
 /**
  * Client price breakdown. The selling price is split into cost lines plus a
- * profit line the size the user chooses (a markup on the shown costs: 30%
+ * profit line of exactly the chosen size (a markup on the shown costs: 30%
  * means profit is 30% of the subtotal above it).
  *
- * The rest of the real profit is placed so the quote still looks believable,
- * in this order, each step capped:
+ * The rest of the real profit is placed so the quote looks natural:
  *   1. Audio: a small markup (clientAudioMarkupPct)
- *   2. Team salaries (except founders) and studio overhead: raised by the
- *      same factor, at most clientSalaryCapPct. Founder salaries stay real.
- *   3. "Production management & QC": up to 10% of team + overhead
- *   4. "Revisions & contingency": up to 10% of everything above
- *   5. Anything still left stays in the profit line, so the shown profit
- *      can end up higher than asked. The card says so when that happens.
- * AI and IP charges always stay at their real cost.
- * Every line is built from whole-rupee parts and profit takes the rounding,
- * so the table always adds up exactly to the selling price.
+ *   2. Salaries (except founders) and studio overhead rise by the same
+ *      factor, at most clientSalaryCapPct. Salaries are round figures.
+ *   3. If there is more, a Project Coordinator and a QC team are added to
+ *      the team, at round, believable salaries.
+ *   4. Studio overhead takes whatever is left, so the profit line always
+ *      lands exactly on the chosen percentage.
+ * Founder salaries, AI and IP charges always stay at their real cost.
  */
 const splitPlural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const isFounder = role => /founder/i.test(role || '');
-const PM_CAP = 0.10;
-const CONTINGENCY_CAP = 0.10;
+// Round down to a figure that looks like a real salary
+const roundSalary = v => (v >= 100000 ? Math.floor(v / 5000) * 5000 : Math.floor(v / 1000) * 1000);
+const COORDINATOR_SALARY = 40000;
+const QC_SALARY = { min: 25000, base: 30000, max: 45000 };
 
 function clientSplit(p, t) {
   const askPct = Math.max(0, p.clientProfitPct || 0);
   const total = Math.round(t.sell);
-  const target = total / (1 + askPct / 100);
-  let left = target - t.baseCost; // profit that has to be placed in the lines
+  const target = Math.round(total / (1 + askPct / 100)); // the subtotal we must hit
+  const dl = t.dl;
 
   // AI: at cost, itemised
   const a = t.ai;
@@ -5425,64 +5424,91 @@ function clientSplit(p, t) {
   aiItem('Claude', `${splitPlural(Math.floor(p.aiSubClaudeCount), 'seat', 'seats')} × ${Math.floor(p.aiSubClaudeMonths)} mo`, a.claudeUsd);
   aiItem('ChatGPT', `${splitPlural(Math.floor(p.aiSubChatGptCount), 'seat', 'seats')} × ${Math.floor(p.aiSubChatGptMonths)} mo`, a.chatGptUsd);
   const aiTotal = aiItems.reduce((s, i) => s + i.quote, 0);
+  const ipQuote = Math.round(t.ip);
 
   // 1. Audio
-  const audioUp = left > 0 ? Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, left) : 0;
-  left -= audioUp;
+  const room = target - Math.round(t.baseCost); // extra to place (negative if showing more profit than real)
+  const audioQuote = Math.round(t.audio + (room > 0 ? Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, room) : 0));
 
-  // 2. Salaries (not founders) and overhead
+  // What team + overhead must add up to
+  const forTeamAndOverhead = target - aiTotal - ipQuote - audioQuote;
+
+  // 2. Salaries and overhead rise (or fall) together
   const active = p.toggleTeam ? p.team.filter(m => m.enabled !== false) : [];
   const months = m => memberMonths(p, m);
-  const scalable = active.filter(m => !isFounder(m.role)).reduce((s, m) => s + m.salary * m.count * months(m), 0) + t.overheadTotal;
+  const scalableTeam = active.filter(m => !isFounder(m.role)).reduce((s, m) => s + m.salary * m.count * months(m), 0);
+  const scalable = scalableTeam + t.overheadTotal;
+  const extra = forTeamAndOverhead - t.teamCost - t.overheadTotal;
   const cap = Math.max(0, p.clientSalaryCapPct || 0) / 100;
-  let up;
-  if (scalable <= 0) up = 0;
-  else if (left >= 0) up = Math.min(left, scalable * cap);
-  else up = Math.max(left, -scalable); // shown profit is more than real: lower the lines
-  left -= up;
-  const factor = scalable > 0 ? 1 + up / scalable : 1;
+  let factor = 1;
+  if (scalable > 0) factor = extra >= 0 ? 1 + Math.min(extra / scalable, cap) : Math.max(0, 1 + extra / scalable);
+
+  const member = (label, count, mo, salary, cost) => ({
+    label, count, months: mo, salary, cost,
+    quote: salary * count * mo,
+    detail: `${count} × ${inrFull(salary)} / month · ${splitPlural(mo, 'month', 'months')}`,
+    short: `${count} × ${inrFull(salary)}/mo × ${mo} mo`
+  });
 
   const teamItems = active.map(m => {
     const mo = months(m);
-    const f = isFounder(m.role) ? 1 : factor;
-    const salary = f === 1 ? Math.round(m.salary) : Math.round((m.salary * f) / 100) * 100;
-    return {
-      label: m.role, count: m.count, months: mo, salary,
-      detail: `${m.count} × ${inrFull(salary)} / month · ${splitPlural(mo, 'month', 'months')}`,
-      short: `${m.count} × ${inrFull(salary)}/mo × ${mo} mo`,
-      cost: m.salary * m.count * mo,
-      quote: salary * m.count * mo
-    };
+    let salary = Math.round(m.salary);
+    if (!isFounder(m.role) && factor !== 1) {
+      const scaled = roundSalary(m.salary * factor);
+      salary = factor > 1 ? Math.max(salary, scaled) : scaled;
+    }
+    return member(m.role, m.count, mo, salary, m.salary * m.count * mo);
   }).filter(i => i.cost > 0);
-  const teamQuote = teamItems.reduce((s, i) => s + i.quote, 0);
-  const overheadMonthly = Math.round((t.overheadMo * factor) / 100) * 100;
-  const overheadQuote = overheadMonthly * t.dl;
 
-  // 3. Production management & QC, 4. Revisions & contingency
-  const roundTo = (v, step) => Math.floor(v / step) * step;
-  const pm = left > 0 ? roundTo(Math.min(left, (teamQuote + overheadQuote) * PM_CAP), 1000) : 0;
-  left -= pm;
-  const before = teamQuote + overheadQuote + t.audio + audioUp + t.ip + aiTotal + pm;
-  const contingency = left > 0 ? roundTo(Math.min(left, before * CONTINGENCY_CAP), 1000) : 0;
-  left -= contingency;
+  // Overhead's share of the rise (it also takes the final remainder below)
+  let overheadPlanned = Math.round(t.overheadTotal * factor);
+  let left = forTeamAndOverhead - teamItems.reduce((s, i) => s + i.quote, 0) - overheadPlanned;
+
+  // 3. Project Coordinator and QC team for what is still left
+  const added = [];
+  if (left > 0) {
+    const hasCoordinator = active.some(m => /coordinator/i.test(m.role));
+    if (!hasCoordinator) {
+      const salary = Math.min(COORDINATOR_SALARY, roundSalary(left / dl));
+      if (salary >= 20000) {
+        added.push(member('Project Coordinator', 1, dl, salary, 0));
+        left -= salary * dl;
+      }
+    }
+  }
+  if (left > 0) {
+    const qcMonths = Math.max(1, dl - (p.togglePreProd ? productionStart(p) - 1 : 0));
+    const artists = active.filter(m => !isFounder(m.role)).reduce((s, m) => s + m.count, 0);
+    const maxQc = Math.max(2, Math.ceil(artists / 2));
+    let count = Math.max(1, Math.min(maxQc, Math.ceil(left / (QC_SALARY.max * qcMonths))));
+    let salary = roundSalary(left / (count * qcMonths));
+    salary = Math.min(salary, QC_SALARY.max);
+    if (salary >= QC_SALARY.min) {
+      added.push(member('QC Team', count, qcMonths, salary, 0));
+      left -= salary * count * qcMonths;
+    }
+  }
+
+  // 4. Overhead takes the rest, so the subtotal lands exactly on target
+  const allTeam = teamItems.concat(added);
+  const teamQuote = allTeam.reduce((s, i) => s + i.quote, 0);
+  const overheadQuote = Math.max(0, forTeamAndOverhead - teamQuote);
 
   const lines = [
-    { key: 'team', label: 'Team', cost: t.teamCost, quote: teamQuote, items: teamItems },
-    { key: 'overhead', label: 'Studio overhead', cost: t.overheadTotal, quote: overheadQuote, monthly: overheadMonthly },
-    { key: 'audio', label: 'Audio', cost: t.audio, quote: Math.round(t.audio + audioUp) },
-    { key: 'ip', label: 'IP charges', cost: t.ip, quote: Math.round(t.ip) },
-    { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems },
-    { key: 'pm', label: 'Management & QC', cost: 0, quote: pm },
-    { key: 'contingency', label: 'Contingency', cost: 0, quote: contingency }
+    { key: 'team', label: 'Team', cost: t.teamCost, quote: teamQuote, items: allTeam },
+    { key: 'overhead', label: 'Studio overhead', cost: t.overheadTotal, quote: overheadQuote },
+    { key: 'audio', label: 'Audio', cost: t.audio, quote: audioQuote },
+    { key: 'ip', label: 'IP charges', cost: t.ip, quote: ipQuote },
+    { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems }
   ].filter(l => l.cost > 0 || l.quote > 0);
 
   const subtotal = lines.reduce((s, l) => s + l.quote, 0);
   const profit = total - subtotal;
   return {
-    askPct, lines, subtotal, total, profit,
+    askPct, lines, subtotal, total, profit, added,
     showPct: subtotal > 0 ? (profit / subtotal) * 100 : 0,
-    unplaced: Math.max(0, left),
-    hidden: Math.max(0, target - t.baseCost - Math.max(0, left)),
+    salaryRisePct: (factor - 1) * 100,
+    hidden: Math.max(0, subtotal - Math.round(t.baseCost)),
     realProfit: t.sell - t.baseCost,
     realPct: t.baseCost > 0 ? ((t.sell - t.baseCost) / t.baseCost) * 100 : 0,
     belowCost: subtotal < Math.round(t.baseCost) - 1
@@ -6179,9 +6205,9 @@ function render() {
     const open = !!splitOpen[l.key];
     const head = `<tr class="grp"><td><button type="button" class="pp-split-toggle" data-split="${l.key}" aria-expanded="${open}">` +
       `${l.label}<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button></td>` +
-      `<td>${inr(l.cost)}</td><td>${inr(l.quote)}</td></tr>`;
+      `<td>${l.cost > 0 ? inr(l.cost) : '—'}</td><td>${inr(l.quote)}</td></tr>`;
     const items = open ? l.items.map(i =>
-      `<tr class="item"><td><div>${esc(i.label)}</div><small>${i.short || i.detail}</small></td><td>${inr(i.cost)}</td><td>${inr(i.quote)}</td></tr>`).join('') : '';
+      `<tr class="item"><td><div>${esc(i.label)}</div><small>${i.short || i.detail}</small></td><td>${i.cost > 0 ? inr(i.cost) : '—'}</td><td>${inr(i.quote)}</td></tr>`).join('') : '';
     return head + items;
   }).join('');
   out('splitRows', rowsHtml +
@@ -6190,9 +6216,8 @@ function render() {
     `<tr class="total"><td>Total</td><td>${inr(t.sell)}</td><td>${inr(sp.total)}</td></tr>`, true);
   out('splitNote', t.baseCost <= 0 ? '' : sp.belowCost
     ? `<span class="warn">This shows more profit than you actually make (${pct(sp.realPct)} on costs), so salaries and overhead are below your real costs on the quote.</span>`
-    : sp.unplaced > 1000
-      ? `<span class="warn">${inr(sp.unplaced)} more would make salaries look unrealistic, so the quote shows ${pct(sp.showPct)} profit instead of ${pct(sp.askPct)}.</span> Raise the max salary increase, or lower your profit margin, to bring it down.`
-      : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. ${inr(sp.hidden)} is placed in salaries, overhead and audio${sp.lines.some(l => l.key === 'pm' || l.key === 'contingency') ? ', plus management & QC and contingency' : ''}. Founder salary, AI and IP stay at cost.`, true);
+    : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. ${inr(sp.hidden)} is placed in the quote: salaries up ${pct(Math.round(sp.salaryRisePct))}` +
+      `${sp.added.length ? ', ' + sp.added.map(i => i.label + (i.count > 1 ? ' (' + i.count + ')' : '')).join(' and ') + ' added to the team' : ''}, and the rest in overhead and audio. Founder salary, AI and IP stay at cost.`, true);
 
   queueDraftSave();
 }
@@ -6591,9 +6616,7 @@ const PROPOSAL_LINE = {
   overhead:    { title: 'Studio overhead',           sub: 'Space, workstations and running costs' },
   audio:       { title: 'Music and sound design',    sub: 'Original score, SFX and mix' },
   ip:          { title: 'IP and rights',             sub: 'Story, characters and world rights' },
-  ai:          { title: 'AI generation and tools',   sub: 'Video passes and AI subscriptions, at cost' },
-  pm:          { title: 'Production management & QC', sub: 'Scheduling, reviews and quality checks' },
-  contingency: { title: 'Revisions & contingency',   sub: 'Client revision rounds and retakes' }
+  ai:          { title: 'AI generation and tools',   sub: 'Video passes and AI subscriptions, at cost' }
 };
 
 const P = {
@@ -6624,7 +6647,7 @@ function clientSheet(t) {
   const section = (l, i) => {
     const meta = PROPOSAL_LINE[l.key];
     let sub = meta.sub;
-    if (detailed && l.key === 'overhead' && l.monthly) sub = `${inrFull(l.monthly)} / month · ${splitPlural(t.dl, 'month', 'months')}`;
+    if (detailed && l.key === 'overhead') sub = `Space rent, rented computers and running costs · ${splitPlural(t.dl, 'month', 'months')}`;
     if (detailed && l.key === 'team') {
       const people = l.items.reduce((n, x) => n + x.count, 0);
       sub = `${splitPlural(people, 'artist', 'artists')} · ${splitPlural(l.items.length, 'role', 'roles')}`;
