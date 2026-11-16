@@ -5249,6 +5249,7 @@ function defaults() {
     profitPct: 150,
     clientProfitPct: 30,
     clientAudioMarkupPct: 10,
+    clientSalaryCapPct: 50,
     proposalMode: 'normal',
     toggleCommission: false,
     commissionPct: 0
@@ -5381,25 +5382,33 @@ function audioLine(on, mode, fixed, perMin, perEp, totalMins, epCount) {
 }
 
 /**
- * Client price breakdown. The selling price is split into the summary's cost
- * lines plus a profit line the size the user chooses (a markup on the shown
- * costs: 30% means profit is 30% of the subtotal above it).
+ * Client price breakdown. The selling price is split into cost lines plus a
+ * profit line the size the user chooses (a markup on the shown costs: 30%
+ * means profit is 30% of the subtotal above it).
  *
- * The rest of the real profit is hidden like this:
- *   - AI and IP charges stay at their real cost
- *   - Audio gets a small markup (clientAudioMarkupPct)
- *   - everything else goes into Team and Studio overhead, in proportion to
- *     their real costs, and each salary is scaled up by the same factor
- * Every line is built from whole-rupee parts, and profit takes the rounding,
+ * The rest of the real profit is placed so the quote still looks believable,
+ * in this order, each step capped:
+ *   1. Audio: a small markup (clientAudioMarkupPct)
+ *   2. Team salaries (except founders) and studio overhead: raised by the
+ *      same factor, at most clientSalaryCapPct. Founder salaries stay real.
+ *   3. "Production management & QC": up to 10% of team + overhead
+ *   4. "Revisions & contingency": up to 10% of everything above
+ *   5. Anything still left stays in the profit line, so the shown profit
+ *      can end up higher than asked. The card says so when that happens.
+ * AI and IP charges always stay at their real cost.
+ * Every line is built from whole-rupee parts and profit takes the rounding,
  * so the table always adds up exactly to the selling price.
  */
 const splitPlural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const isFounder = role => /founder/i.test(role || '');
+const PM_CAP = 0.10;
+const CONTINGENCY_CAP = 0.10;
 
 function clientSplit(p, t) {
-  const showPct = Math.max(0, p.clientProfitPct || 0);
+  const askPct = Math.max(0, p.clientProfitPct || 0);
   const total = Math.round(t.sell);
-  const target = total / (1 + showPct / 100);
-  const extra = target - t.baseCost; // profit that has to be hidden in the lines
+  const target = total / (1 + askPct / 100);
+  let left = target - t.baseCost; // profit that has to be placed in the lines
 
   // AI: at cost, itemised
   const a = t.ai;
@@ -5411,55 +5420,69 @@ function clientSplit(p, t) {
     }
   };
   const footage = a.footageMins + (p.aiFootageSecs ? ` min ${p.aiFootageSecs}s` : ' min');
-  aiItem(`${a.draftTier.label} draft`, `${splitPlural(a.draftPasses, 'pass', 'passes')} · ${footage} of footage`, a.draftUsd);
-  aiItem(`${a.finalTier.label} final`, `${splitPlural(a.finalPasses, 'pass', 'passes')} · ${footage} of footage`, a.finalUsd);
-  aiItem('Claude', `${splitPlural(Math.floor(p.aiSubClaudeCount), 'seat', 'seats')} × ${splitPlural(Math.floor(p.aiSubClaudeMonths), 'month', 'months')}`, a.claudeUsd);
-  aiItem('ChatGPT', `${splitPlural(Math.floor(p.aiSubChatGptCount), 'seat', 'seats')} × ${splitPlural(Math.floor(p.aiSubChatGptMonths), 'month', 'months')}`, a.chatGptUsd);
+  aiItem(`${a.draftTier.label} draft`, `${splitPlural(a.draftPasses, 'pass', 'passes')} · ${footage}`, a.draftUsd);
+  aiItem(`${a.finalTier.label} final`, `${splitPlural(a.finalPasses, 'pass', 'passes')} · ${footage}`, a.finalUsd);
+  aiItem('Claude', `${splitPlural(Math.floor(p.aiSubClaudeCount), 'seat', 'seats')} × ${Math.floor(p.aiSubClaudeMonths)} mo`, a.claudeUsd);
+  aiItem('ChatGPT', `${splitPlural(Math.floor(p.aiSubChatGptCount), 'seat', 'seats')} × ${Math.floor(p.aiSubChatGptMonths)} mo`, a.chatGptUsd);
   const aiTotal = aiItems.reduce((s, i) => s + i.quote, 0);
 
-  // Audio: small markup, never more than the profit there is to hide
-  const audioMarkup = extra > 0 ? Math.min(t.audio * (Math.max(0, p.clientAudioMarkupPct || 0) / 100), extra) : 0;
-  let audioQuote = t.audio + audioMarkup;
+  // 1. Audio
+  const audioUp = left > 0 ? Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, left) : 0;
+  left -= audioUp;
 
-  // Team and overhead take the rest
-  const flexCost = t.teamCost + t.overheadTotal;
-  let pool = extra - audioMarkup;
-  if (flexCost <= 0 && t.audio > 0) { audioQuote += pool; pool = 0; }
-  const factor = flexCost > 0 ? Math.max(0, (flexCost + pool) / flexCost) : 1;
-
+  // 2. Salaries (not founders) and overhead
   const active = p.toggleTeam ? p.team.filter(m => m.enabled !== false) : [];
+  const months = m => memberMonths(p, m);
+  const scalable = active.filter(m => !isFounder(m.role)).reduce((s, m) => s + m.salary * m.count * months(m), 0) + t.overheadTotal;
+  const cap = Math.max(0, p.clientSalaryCapPct || 0) / 100;
+  let up;
+  if (scalable <= 0) up = 0;
+  else if (left >= 0) up = Math.min(left, scalable * cap);
+  else up = Math.max(left, -scalable); // shown profit is more than real: lower the lines
+  left -= up;
+  const factor = scalable > 0 ? 1 + up / scalable : 1;
+
   const teamItems = active.map(m => {
-    const months = memberMonths(p, m);
-    const salary = Math.round((m.salary * factor) / 100) * 100; // neat client-facing salary
+    const mo = months(m);
+    const f = isFounder(m.role) ? 1 : factor;
+    const salary = f === 1 ? Math.round(m.salary) : Math.round((m.salary * f) / 100) * 100;
     return {
-      label: m.role,
-      count: m.count,
-      months,
-      salary,
-      detail: `${splitPlural(m.count, 'person', 'people')} × ${inrFull(salary)}/month × ${splitPlural(months, 'month', 'months')}`,
-      short: `${m.count} × ${inrFull(salary)}/mo × ${months} mo`,
-      cost: m.salary * m.count * months,
-      quote: salary * m.count * months
+      label: m.role, count: m.count, months: mo, salary,
+      detail: `${m.count} × ${inrFull(salary)} / month · ${splitPlural(mo, 'month', 'months')}`,
+      short: `${m.count} × ${inrFull(salary)}/mo × ${mo} mo`,
+      cost: m.salary * m.count * mo,
+      quote: salary * m.count * mo
     };
   }).filter(i => i.cost > 0);
   const teamQuote = teamItems.reduce((s, i) => s + i.quote, 0);
-
   const overheadMonthly = Math.round((t.overheadMo * factor) / 100) * 100;
   const overheadQuote = overheadMonthly * t.dl;
+
+  // 3. Production management & QC, 4. Revisions & contingency
+  const roundTo = (v, step) => Math.floor(v / step) * step;
+  const pm = left > 0 ? roundTo(Math.min(left, (teamQuote + overheadQuote) * PM_CAP), 1000) : 0;
+  left -= pm;
+  const before = teamQuote + overheadQuote + t.audio + audioUp + t.ip + aiTotal + pm;
+  const contingency = left > 0 ? roundTo(Math.min(left, before * CONTINGENCY_CAP), 1000) : 0;
+  left -= contingency;
 
   const lines = [
     { key: 'team', label: 'Team', cost: t.teamCost, quote: teamQuote, items: teamItems },
     { key: 'overhead', label: 'Studio overhead', cost: t.overheadTotal, quote: overheadQuote, monthly: overheadMonthly },
-    { key: 'audio', label: 'Audio', cost: t.audio, quote: Math.round(audioQuote) },
+    { key: 'audio', label: 'Audio', cost: t.audio, quote: Math.round(t.audio + audioUp) },
     { key: 'ip', label: 'IP charges', cost: t.ip, quote: Math.round(t.ip) },
-    { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems }
-  ].filter(l => l.cost > 0);
+    { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems },
+    { key: 'pm', label: 'Management & QC', cost: 0, quote: pm },
+    { key: 'contingency', label: 'Contingency', cost: 0, quote: contingency }
+  ].filter(l => l.cost > 0 || l.quote > 0);
 
   const subtotal = lines.reduce((s, l) => s + l.quote, 0);
+  const profit = total - subtotal;
   return {
-    showPct, lines, subtotal, total,
-    profit: total - subtotal,
-    hidden: Math.max(0, extra),
+    askPct, lines, subtotal, total, profit,
+    showPct: subtotal > 0 ? (profit / subtotal) * 100 : 0,
+    unplaced: Math.max(0, left),
+    hidden: Math.max(0, target - t.baseCost - Math.max(0, left)),
     realProfit: t.sell - t.baseCost,
     realPct: t.baseCost > 0 ? ((t.sell - t.baseCost) / t.baseCost) * 100 : 0,
     belowCost: subtotal < Math.round(t.baseCost) - 1
@@ -5887,7 +5910,8 @@ function shellHtml() {
         </div>
       </div>
       <div class="pp-fields">
-        ${num('clientAudioMarkupPct', 'Audio markup on quote (%)', 'min="0" step="1"')}
+        ${num('clientSalaryCapPct', 'Max salary increase (%)', 'min="0" step="1"')}
+        ${num('clientAudioMarkupPct', 'Audio markup (%)', 'min="0" step="1"')}
       </div>
       <table class="pp-split">
         <thead><tr><th>Item</th><th>Your cost</th><th>On quote</th></tr></thead>
@@ -6150,7 +6174,7 @@ function render() {
   const sp = clientSplit(s, t);
   const rowsHtml = sp.lines.map(l => {
     if (!l.items || !l.items.length) {
-      return `<tr><td>${l.label}</td><td>${inr(l.cost)}</td><td>${inr(l.quote)}</td></tr>`;
+      return `<tr><td>${l.label}</td><td>${l.cost > 0 ? inr(l.cost) : '—'}</td><td>${inr(l.quote)}</td></tr>`;
     }
     const open = !!splitOpen[l.key];
     const head = `<tr class="grp"><td><button type="button" class="pp-split-toggle" data-split="${l.key}" aria-expanded="${open}">` +
@@ -6162,11 +6186,13 @@ function render() {
   }).join('');
   out('splitRows', rowsHtml +
     `<tr class="sub"><td>Subtotal</td><td>${inr(t.baseCost)}</td><td>${inr(sp.subtotal)}</td></tr>` +
-    `<tr class="profit"><td>Profit (${pct(sp.showPct)})</td><td>${inr(sp.realProfit)}</td><td>${inr(sp.profit)}</td></tr>` +
+    `<tr class="profit"><td>Profit (${pct(Math.round(sp.showPct))})</td><td>${inr(sp.realProfit)}</td><td>${inr(sp.profit)}</td></tr>` +
     `<tr class="total"><td>Total</td><td>${inr(t.sell)}</td><td>${inr(sp.total)}</td></tr>`, true);
   out('splitNote', t.baseCost <= 0 ? '' : sp.belowCost
-    ? `<span class="warn">This shows more profit than you actually make (${pct(sp.realPct)} on costs), so Team and Studio overhead are below your real costs on the quote.</span>`
-    : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. The quote shows ${pct(sp.showPct)}; the other ${inr(sp.hidden)} goes into Team and Studio overhead, with a small share in Audio. AI and IP stay at cost.`, true);
+    ? `<span class="warn">This shows more profit than you actually make (${pct(sp.realPct)} on costs), so salaries and overhead are below your real costs on the quote.</span>`
+    : sp.unplaced > 1000
+      ? `<span class="warn">${inr(sp.unplaced)} more would make salaries look unrealistic, so the quote shows ${pct(sp.showPct)} profit instead of ${pct(sp.askPct)}.</span> Raise the max salary increase, or lower your profit margin, to bring it down.`
+      : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. ${inr(sp.hidden)} is placed in salaries, overhead and audio${sp.lines.some(l => l.key === 'pm' || l.key === 'contingency') ? ', plus management & QC and contingency' : ''}. Founder salary, AI and IP stay at cost.`, true);
 
   queueDraftSave();
 }
@@ -6544,7 +6570,7 @@ function internalSheet(t) {
         const cell = (label, value, color = '#ffffff') => `<div><div style="font-size:11px;color:#94a3b8;">${label}</div><div style="font-size:14px;font-weight:700;color:${color};">${value}</div></div>`;
         return `
       <div style="margin-bottom:16px;">
-        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#94a3b8;margin-bottom:8px;">As shown on the client quote (profit ${pct(sp.showPct)} on costs)</div>
+        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#94a3b8;margin-bottom:8px;">As shown on the client quote (profit ${pct(Math.round(sp.showPct))} on costs)</div>
         <div style="display:grid;grid-template-columns:repeat(${sp.lines.length + 1},1fr);gap:10px;${box}">
           ${sp.lines.map(l => cell(l.label, inr(l.quote))).join('')}
           ${cell('Profit', inr(sp.profit), '#10b981')}
@@ -6559,134 +6585,123 @@ function internalSheet(t) {
     </div>`;
 }
 
-const CLIENT_LINE = {
-  team: { title: 'Animation and CG production', desc: () => 'End-to-end design and execution: pre-production (storyboarding, concept art, script), 3D assets and modeling, rigging, texturing, lighting, keyframe animation, background environments, VFX, rendering and compositing.' },
-  overhead: { title: 'Studio overhead expenses', desc: t => `Studio space rent, rented workstations and the monthly running costs of the studio for the ${t.dl}-month schedule.` },
-  audio: { title: 'Original score and sound design', desc: () => 'Original musical composition, sound effect design, foley mastering and stem deliveries.' },
-  ip: { title: 'IP and rights licensing', desc: () => 'Proprietary story IP, universe bible, character designs and concept worldbuilding rights.' },
-  ai: { title: 'AI tools and rendering', desc: () => 'AI video generation passes and AI tool subscriptions, billed at cost.' }
+// ---- Client proposal (normal and detailed) ----
+const PROPOSAL_LINE = {
+  team:        { title: 'Production team',          sub: 'Pre-production to final render' },
+  overhead:    { title: 'Studio overhead',           sub: 'Space, workstations and running costs' },
+  audio:       { title: 'Music and sound design',    sub: 'Original score, SFX and mix' },
+  ip:          { title: 'IP and rights',             sub: 'Story, characters and world rights' },
+  ai:          { title: 'AI generation and tools',   sub: 'Video passes and AI subscriptions, at cost' },
+  pm:          { title: 'Production management & QC', sub: 'Scheduling, reviews and quality checks' },
+  contingency: { title: 'Revisions & contingency',   sub: 'Client revision rounds and retakes' }
 };
 
-// Detailed proposal rows: each line as a heading with its parts underneath
-function detailedRows(sp, t) {
-  const td = 'padding:10px 14px;font-size:13px;vertical-align:top;';
-  const amount = 'text-align:right;white-space:nowrap;';
-  const group = (title, desc, value) => `
-    <tr style="background:#f8fafc;border-top:1px solid #cbd5e1;border-bottom:1px solid #e2e8f0;">
-      <td style="${td}font-weight:800;color:#0f172a;">${title}</td>
-      <td style="${td}color:#64748b;line-height:1.5;">${desc}</td>
-      <td style="${td}${amount}font-weight:800;color:#0f172a;">${inrFull(value)}</td>
-    </tr>`;
-  const item = (label, detail, value) => `
-    <tr style="border-bottom:1px solid #f1f5f9;">
-      <td style="${td}padding-left:28px;color:#1e293b;">${esc(label)}</td>
-      <td style="${td}color:#475569;">${detail}</td>
-      <td style="${td}${amount}color:#334155;">${inrFull(value)}</td>
-    </tr>`;
-
-  return sp.lines.map(l => {
-    if (l.key === 'team') {
-      const people = l.items.reduce((s, i) => s + i.count, 0);
-      return group('Team', `${splitPlural(people, 'artist', 'artists')} across ${splitPlural(l.items.length, 'role', 'roles')}`, l.quote) +
-        l.items.map(i => item(i.label, i.detail, i.quote)).join('');
-    }
-    if (l.key === 'overhead') {
-      return group('Overhead expenses', `Space rent, rented computers and the monthly running costs of the studio · ${inrFull(l.monthly)}/month × ${splitPlural(t.dl, 'month', 'months')}`, l.quote);
-    }
-    if (l.key === 'ai') {
-      return group('AI', 'AI video generation and AI tool subscriptions, billed at cost', l.quote) +
-        l.items.map(i => item(i.label, i.detail, i.quote)).join('');
-    }
-    return group(CLIENT_LINE[l.key].title, CLIENT_LINE[l.key].desc(t), l.quote);
-  }).join('');
-}
+const P = {
+  ink: '#0f172a', body: '#334155', muted: '#64748b', faint: '#94a3b8',
+  line: '#e2e8f0', soft: '#f8fafc', accent: '#4f46e5', accentSoft: '#eef2ff'
+};
 
 function clientSheet(t) {
   const s = state;
-  const cap = 'font-size:11px;text-transform:uppercase;color:#64748b;font-weight:700;letter-spacing:0.05em;';
-  const th = 'padding:12px 14px;font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:0.05em;';
   const sp = clientSplit(s, t);
+  const detailed = s.proposalMode === 'detailed';
+  const date = new Date().toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' });
+  const scope = t.isSeries ? `${s.episodes} episodes × ${s.epMins} min` : 'Feature film';
 
-  const row = (title, desc, amount) => `
-    <tr style="border-bottom:1px solid #e2e8f0;">
-      <td style="padding:12px 14px;font-size:13px;color:#1e293b;font-weight:600;vertical-align:top;">${title}</td>
-      <td style="padding:12px 14px;font-size:13px;color:#64748b;line-height:1.5;vertical-align:top;">${desc}</td>
-      <td style="padding:12px 14px;font-size:13px;text-align:right;font-weight:700;color:#0f172a;vertical-align:top;white-space:nowrap;">${inrFull(amount)}</td>
-    </tr>`;
+  const chip = (label, value) => `
+    <div style="flex:1;background:${P.soft};border:1px solid ${P.line};border-radius:10px;padding:12px 16px;">
+      <div style="font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:${P.faint};">${label}</div>
+      <div style="font-size:15px;font-weight:700;color:${P.ink};margin-top:3px;">${value}</div>
+    </div>`;
+
+  const itemRow = (label, detail, value) => `
+    <div style="display:flex;align-items:baseline;gap:12px;padding:7px 0 7px 44px;font-size:12.5px;border-top:1px dashed ${P.line};">
+      <div style="flex:0 0 190px;color:${P.body};">${esc(label)}</div>
+      <div style="flex:1;color:${P.muted};">${detail}</div>
+      <div style="color:${P.body};font-variant-numeric:tabular-nums;white-space:nowrap;">${inrFull(value)}</div>
+    </div>`;
+
+  const section = (l, i) => {
+    const meta = PROPOSAL_LINE[l.key];
+    let sub = meta.sub;
+    if (detailed && l.key === 'overhead' && l.monthly) sub = `${inrFull(l.monthly)} / month · ${splitPlural(t.dl, 'month', 'months')}`;
+    if (detailed && l.key === 'team') {
+      const people = l.items.reduce((n, x) => n + x.count, 0);
+      sub = `${splitPlural(people, 'artist', 'artists')} · ${splitPlural(l.items.length, 'role', 'roles')}`;
+    }
+    const items = detailed && l.items && l.items.length ? l.items.map(x => itemRow(x.label, x.detail, x.quote)).join('') : '';
+    return `
+      <div style="padding:14px 0;border-top:1px solid ${P.line};">
+        <div style="display:flex;align-items:center;gap:14px;">
+          <div style="flex:0 0 30px;height:30px;border-radius:8px;background:${P.accentSoft};color:${P.accent};font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;">${String(i + 1).padStart(2, '0')}</div>
+          <div style="flex:1;">
+            <div style="font-size:14.5px;font-weight:700;color:${P.ink};">${meta.title}</div>
+            <div style="font-size:12px;color:${P.muted};margin-top:2px;">${sub}</div>
+          </div>
+          <div style="font-size:15px;font-weight:700;color:${P.ink};font-variant-numeric:tabular-nums;white-space:nowrap;">${inrFull(l.quote)}</div>
+        </div>
+        ${items ? `<div style="margin-top:10px;">${items}</div>` : ''}
+      </div>`;
+  };
+
+  const sumRow = (label, value, strong) => `
+    <div style="display:flex;justify-content:space-between;gap:16px;padding:6px 0;font-size:${strong ? '14px' : '13px'};color:${strong ? P.ink : P.body};font-weight:${strong ? 700 : 500};">
+      <span>${label}</span><span style="font-variant-numeric:tabular-nums;">${inrFull(value)}</span>
+    </div>`;
+
+  const perUnit = [
+    t.isSeries && s.episodes > 0 ? `${inr(t.sellPerEp)} per episode` : '',
+    `${inrUnit(t.sellPerMin)} per minute`
+  ].filter(Boolean).join(' · ');
 
   return `
-    <div id="ppSheet" style="width:${SHEET_WIDTH}px;box-sizing:border-box;background:#ffffff;color:#0f172a;border-radius:12px;padding:40px;font-family:${SHEET_FONT};border:1px solid #e2e8f0;">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;border-bottom:2px solid #0f172a;padding-bottom:20px;margin-bottom:28px;">
-        <div>
-          <div style="font-size:22px;font-weight:900;letter-spacing:-0.5px;color:#0f172a;text-transform:uppercase;">Weybec Animation Studio</div>
-          <div style="font-size:12px;color:#64748b;margin-top:4px;">${s.proposalMode === 'detailed' ? 'Detailed production proposal' : 'Commercial production proposal and deliverables scope'}</div>
-        </div>
-        <div style="text-align:right;flex-shrink:0;">
-          <div style="${cap}">Date of quotation</div>
-          <div style="font-size:14px;font-weight:700;color:#0f172a;">${new Date().toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' })}</div>
-        </div>
-      </div>
+    <div id="ppSheet" style="width:${SHEET_WIDTH}px;box-sizing:border-box;background:#ffffff;color:${P.ink};font-family:${SHEET_FONT};border-radius:14px;overflow:hidden;border:1px solid ${P.line};">
+      <div style="height:6px;background:linear-gradient(90deg,${P.accent},#8b5cf6);"></div>
+      <div style="padding:40px 44px 36px;">
 
-      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:18px 24px;margin-bottom:28px;display:flex;justify-content:space-between;align-items:center;gap:16px;">
-        <div>
-          <div style="${cap}margin-bottom:4px;">Project title</div>
-          <div style="font-size:20px;font-weight:800;color:#0f172a;">${esc(s.projectName || 'Weybec Animation Project')}</div>
-          <div style="font-size:13px;color:#475569;margin-top:4px;">
-            Scope: ${t.isSeries ? `${s.episodes} master episodes (${s.epMins} min each · ${t.totalMins} min total content)` : `Feature animation film (${t.totalMins} min total content)`}
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div style="width:38px;height:38px;border-radius:10px;background:${P.ink};color:#ffffff;font-weight:900;font-size:18px;display:flex;align-items:center;justify-content:center;">W</div>
+            <div>
+              <div style="font-size:16px;font-weight:800;letter-spacing:-0.2px;">Weybec Animation Studio</div>
+              <div style="font-size:11.5px;color:${P.muted};">${detailed ? 'Detailed production proposal' : 'Production proposal'}</div>
+            </div>
+          </div>
+          <div style="text-align:right;font-size:12px;color:${P.muted};">${date}</div>
+        </div>
+
+        <div style="margin:36px 0 22px;">
+          <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:${P.accent};">Proposal for</div>
+          <div style="font-size:30px;font-weight:800;letter-spacing:-0.6px;line-height:1.15;margin-top:6px;">${esc(s.projectName || 'Weybec Animation Project')}</div>
+        </div>
+
+        <div style="display:flex;gap:12px;margin-bottom:30px;">
+          ${chip('Time', splitPlural(t.dl, 'month', 'months'))}
+          ${chip('Scope', scope)}
+          ${chip('Runtime', `${t.totalMins} min`)}
+        </div>
+
+        <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:${P.faint};margin-bottom:6px;">Investment breakdown</div>
+        ${sp.lines.map(section).join('')}
+
+        <div style="display:flex;justify-content:flex-end;border-top:1px solid ${P.line};padding-top:14px;">
+          <div style="width:330px;">
+            ${sumRow('Subtotal', sp.subtotal)}
+            ${sumRow(`Studio profit (${pct(Math.round(sp.showPct))})`, sp.profit)}
           </div>
         </div>
-        <div style="text-align:right;flex-shrink:0;">
-          <div style="${cap}margin-bottom:4px;">${s.proposalMode === 'detailed' ? 'Time' : 'Production schedule'}</div>
-          <div style="font-size:16px;font-weight:800;color:#0f172a;">${t.dl} calendar months</div>
-          <div style="font-size:12px;color:#0284c7;font-weight:700;">Rate: ${inrUnit(t.sellPerMin)} / min</div>
-        </div>
-      </div>
 
-      <div style="margin-bottom:28px;">
-        <div style="font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:0.05em;color:#0f172a;margin-bottom:12px;">Price breakdown</div>
-        <table style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;">
-          <thead>
-            <tr style="background:#f1f5f9;border-bottom:1px solid #cbd5e1;text-align:left;">
-              <th style="${th}">Item</th>
-              <th style="${th}">Description</th>
-              <th style="${th}text-align:right;">Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${s.proposalMode === 'detailed' ? detailedRows(sp, t) : sp.lines.map(l => row(CLIENT_LINE[l.key].title, CLIENT_LINE[l.key].desc(t), l.quote)).join('')}
-            <tr style="background:#f8fafc;border-bottom:1px solid #e2e8f0;">
-              <td colspan="2" style="padding:12px 14px;font-size:13px;font-weight:700;color:#1e293b;">Subtotal</td>
-              <td style="padding:12px 14px;font-size:13px;text-align:right;font-weight:700;color:#0f172a;white-space:nowrap;">${inrFull(sp.subtotal)}</td>
-            </tr>
-            <tr style="border-bottom:1px solid #e2e8f0;">
-              <td style="padding:12px 14px;font-size:13px;color:#1e293b;font-weight:600;">Studio profit (${pct(sp.showPct)})</td>
-              <td style="padding:12px 14px;font-size:13px;color:#64748b;line-height:1.5;">Studio margin, ${pct(sp.showPct)} on the subtotal above.</td>
-              <td style="padding:12px 14px;font-size:13px;text-align:right;font-weight:700;color:#0f172a;white-space:nowrap;">${inrFull(sp.profit)}</td>
-            </tr>
-            <tr style="background:#f1f5f9;">
-              <td colspan="2" style="padding:12px 14px;font-size:14px;font-weight:800;color:#0f172a;">Total</td>
-              <td style="padding:12px 14px;font-size:14px;text-align:right;font-weight:800;color:#0f172a;white-space:nowrap;">${inrFull(sp.total)}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div style="background:#0f172a;color:#ffffff;border-radius:8px;padding:20px 24px;display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:28px;">
-        <div>
-          <div style="${cap}color:#94a3b8;">Total project quote</div>
-          <div style="font-size:26px;font-weight:900;color:#38bdf8;">${inrFull(sp.total)}</div>
-          ${t.isSeries && s.episodes > 0 ? `<div style="font-size:12px;color:#cbd5e1;margin-top:2px;">${inr(t.sellPerEp)} per finished episode (${s.episodes} episodes)</div>` : ''}
+        <div style="margin-top:16px;background:${P.ink};border-radius:12px;padding:22px 26px;display:flex;justify-content:space-between;align-items:center;gap:16px;">
+          <div>
+            <div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:${P.faint};">Total project investment</div>
+            <div style="font-size:12px;color:#cbd5e1;margin-top:6px;">${perUnit}</div>
+          </div>
+          <div style="font-size:30px;font-weight:800;letter-spacing:-0.5px;color:#ffffff;font-variant-numeric:tabular-nums;">${inrFull(sp.total)}</div>
         </div>
-        <div style="text-align:right;flex-shrink:0;">
-          <div style="${cap}color:#94a3b8;">Finished runtime rate</div>
-          <div style="font-size:20px;font-weight:800;color:#f8fafc;">${inrUnit(t.sellPerMin)} <span style="font-size:13px;font-weight:500;color:#94a3b8;">/ min</span></div>
-        </div>
-      </div>
 
-      <div style="font-size:11px;color:#64748b;line-height:1.6;border-top:1px solid #e2e8f0;padding-top:16px;">
-        <div>• All prices quoted in INR (taxes applicable as per statutory guidelines).</div>
-        <div>• Production timeline initiates upon signing of master service agreement and receipt of initial mobilization advance.</div>
-        <div>• Client revision cycles for storyboards and animation passes will adhere to standard studio approval milestones.</div>
+        <div style="margin-top:22px;font-size:11px;color:${P.faint};line-height:1.6;">
+          All amounts in INR. Taxes extra as applicable. Timeline starts on signing and receipt of the advance.
+        </div>
       </div>
     </div>`;
 }
