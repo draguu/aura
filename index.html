@@ -2764,6 +2764,142 @@ textarea.form-control {
   text-overflow: ellipsis;
 }
 
+/* ==========================================================================
+   MOBILE FIT: the page must never be wider than the screen
+   ========================================================================== */
+
+/* Safety net: clip anything that would widen the page. "clip" does not
+   create a scroll box, so the pinned summary and totals bar still work. */
+.app-workspace {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+/* The header shrinks to fit instead of pushing the page wider */
+.header-left {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.header-title {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-right {
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 12px;
+}
+
+.header-search {
+  flex: 1 1 280px;
+  min-width: 0;
+  width: auto;
+  max-width: 280px;
+}
+
+#quickNewInvoiceBtn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 860px) {
+  .app-header {
+    gap: 12px;
+  }
+
+  .header-title {
+    font-size: 1.25rem;
+  }
+
+  /* Icon-only "Create Document" button */
+  #quickNewInvoiceBtn {
+    width: 40px;
+    padding: 0;
+  }
+
+  #quickNewInvoiceBtn span {
+    display: none;
+  }
+}
+
+@media (max-width: 580px) {
+  .header-left {
+    gap: 10px;
+  }
+
+  .header-title {
+    font-size: 1.1rem;
+  }
+}
+
+/* Summary column: two cards */
+.pp-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Client price breakdown table */
+.pp-split {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  table-layout: fixed;
+}
+
+.pp-split th {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-align: right;
+  padding: 0 0 6px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.pp-split th:first-child,
+.pp-split td:first-child {
+  text-align: left;
+  width: 40%;
+}
+
+.pp-split td {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-color);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pp-split td:nth-child(2) {
+  color: var(--text-secondary);
+}
+
+.pp-split td:nth-child(3) {
+  font-weight: 600;
+}
+
+.pp-split tr.sub td {
+  font-weight: 600;
+}
+
+.pp-split tr.profit td:first-child,
+.pp-split tr.profit td:nth-child(3) {
+  color: var(--success-color);
+  font-weight: 600;
+}
+
+.pp-split tr.total td {
+  border-bottom: none;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
 </style>
 </head>
 <body>
@@ -2870,7 +3006,7 @@ textarea.form-control {
             <input type="text" id="globalSearchInput" placeholder="Search Invoices, Clients...">
           </div>
           
-          <button class="btn btn-primary btn-with-icon" id="quickNewInvoiceBtn">
+          <button class="btn btn-primary btn-with-icon" id="quickNewInvoiceBtn" aria-label="Create document" title="Create document">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="5" x2="12" y2="19"/>
               <line x1="5" y1="12" x2="19" y2="12"/>
@@ -4965,6 +5101,9 @@ function inrShort(n) {
   return String(abs);
 }
 
+const inrFull = n => '₹' + Math.round(n || 0).toLocaleString('en-IN');
+const pct = n => (Math.round(n * 10) / 10).toLocaleString('en-IN') + '%';
+
 const usd = n => '$' + (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
@@ -5043,6 +5182,7 @@ function defaults() {
 
     toggleProfit: true,
     profitPct: 150,
+    clientProfitPct: 30,
     toggleCommission: false,
     commissionPct: 0
   };
@@ -5170,6 +5310,40 @@ function audioLine(on, mode, fixed, perMin, perEp, totalMins, epCount) {
   if (mode === 'perMinute') return perMin * totalMins;
   if (mode === 'perEpisode') return perEp * epCount;
   return fixed;
+}
+
+/**
+ * Client price breakdown: the selling price is split into the same cost
+ * lines as the summary, plus a profit line the size the user chooses.
+ * The shown profit is a markup on the shown costs (30% means profit is 30%
+ * of the subtotal above it). The rest of the real profit is spread across
+ * the cost lines in proportion to what each one actually costs.
+ */
+const SPLIT_LINES = [
+  { key: 'team', label: 'Team', get: t => t.teamCost },
+  { key: 'overhead', label: 'Studio overhead', get: t => t.overheadTotal },
+  { key: 'audio', label: 'Audio', get: t => t.audio },
+  { key: 'ip', label: 'IP charges', get: t => t.ip },
+  { key: 'ai', label: 'AI', get: t => t.ai.inr }
+];
+
+function clientSplit(p, t) {
+  const showPct = Math.max(0, p.clientProfitPct || 0);
+  const total = Math.round(t.sell);
+  const target = total / (1 + showPct / 100);
+  const lines = SPLIT_LINES
+    .map(l => ({ key: l.key, label: l.label, cost: l.get(t) }))
+    .filter(l => l.cost > 0);
+  const base = lines.reduce((s, l) => s + l.cost, 0);
+  lines.forEach(l => { l.quote = base > 0 ? Math.round((l.cost / base) * target) : 0; });
+  const subtotal = lines.reduce((s, l) => s + l.quote, 0);
+  const profit = total - subtotal; // whole rupees, so the table adds up exactly
+  return {
+    showPct, lines, subtotal, profit, total,
+    realProfit: t.sell - t.baseCost,
+    realPct: t.baseCost > 0 ? ((t.sell - t.baseCost) / t.baseCost) * 100 : 0,
+    belowCost: subtotal < Math.round(t.baseCost) - 1
+  };
 }
 
 function compute(p) {
@@ -5533,7 +5707,10 @@ function shellHtml() {
   const summary = `
     <div class="pp-card pp-summary" id="ppSummary">
       <div>
-        <div class="pp-eyebrow">Client selling price</div>
+        <div class="pp-row">
+          <div class="pp-eyebrow">Client selling price</div>
+          <button type="button" class="btn btn-primary btn-sm" data-act="save">Save plan</button>
+        </div>
         <div class="pp-big" data-out="sell"></div>
         <div class="pp-hint" data-out="sellSub"></div>
       </div>
@@ -5574,6 +5751,27 @@ function shellHtml() {
       </div>
     </div>`;
 
+  const split = `
+    <div class="pp-card pp-summary" id="ppSplit">
+      <div>
+        <div class="pp-row-title">Client price breakdown</div>
+        <div class="pp-hint">How the selling price is split on the client quote.</div>
+      </div>
+      <div class="pp-field">
+        <span>Profit shown to the client (% on top of costs)</span>
+        <div class="pp-slider">
+          <input type="range" data-num="clientProfitPct" min="0" max="200" step="1" aria-label="Profit shown to the client, percent">
+          <input type="number" inputmode="decimal" class="form-control" data-num="clientProfitPct" min="0" max="1000" step="1" aria-label="Profit shown to the client, percent">
+          <span class="pp-hint">%</span>
+        </div>
+      </div>
+      <table class="pp-split">
+        <thead><tr><th>Item</th><th>Your cost</th><th>On quote</th></tr></thead>
+        <tbody data-out="splitRows"></tbody>
+      </table>
+      <div class="pp-note" data-out="splitNote"></div>
+    </div>`;
+
   return `
     <div class="pp" id="ppRoot">
       <div class="pp-head">
@@ -5596,7 +5794,7 @@ function shellHtml() {
           ${section('overhead', 'Overhead and IP', overhead, false)}
           ${section('ai', 'AI', ai, false)}
         </div>
-        <aside class="pp-side">${summary}</aside>
+        <aside class="pp-side">${summary}${split}</aside>
       </div>
 
       <div class="pp-saved">
@@ -5824,6 +6022,16 @@ function render() {
 
   out('barCost', inr(t.baseCost));
   out('barSell', inr(t.sell));
+
+  const sp = clientSplit(s, t);
+  out('splitRows', sp.lines.map(l =>
+    `<tr><td>${l.label}</td><td>${inr(l.cost)}</td><td>${inr(l.quote)}</td></tr>`).join('') +
+    `<tr class="sub"><td>Subtotal</td><td>${inr(t.baseCost)}</td><td>${inr(sp.subtotal)}</td></tr>` +
+    `<tr class="profit"><td>Profit (${pct(sp.showPct)})</td><td>${inr(sp.realProfit)}</td><td>${inr(sp.profit)}</td></tr>` +
+    `<tr class="total"><td>Total</td><td>${inr(t.sell)}</td><td>${inr(sp.total)}</td></tr>`, true);
+  out('splitNote', t.baseCost <= 0 ? '' : sp.belowCost
+    ? `<span class="warn">This shows more profit than you actually make (${pct(sp.realPct)} on costs), so the cost lines on the quote are lower than your real costs.</span>`
+    : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. The quote shows ${pct(sp.showPct)} and spreads the remaining ${inr(sp.realProfit - sp.profit)} across the cost lines.`, true);
 
   queueDraftSave();
 }
@@ -6188,6 +6396,19 @@ function internalSheet(t) {
         ${part('IP and AI', inr(t.ip + t.ai.inr), `IP ${inr(t.ip)} · AI ${inr(t.ai.inr)}`, '#38bdf8')}
       </div>
 
+      ${(() => {
+        const sp = clientSplit(s, t);
+        const cell = (label, value, color = '#ffffff') => `<div><div style="font-size:11px;color:#94a3b8;">${label}</div><div style="font-size:14px;font-weight:700;color:${color};">${value}</div></div>`;
+        return `
+      <div style="margin-bottom:16px;">
+        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#94a3b8;margin-bottom:8px;">As shown on the client quote (profit ${pct(sp.showPct)} on costs)</div>
+        <div style="display:grid;grid-template-columns:repeat(${sp.lines.length + 1},1fr);gap:10px;${box}">
+          ${sp.lines.map(l => cell(l.label, inr(l.quote))).join('')}
+          ${cell('Profit', inr(sp.profit), '#10b981')}
+        </div>
+      </div>`;
+      })()}
+
       <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:#64748b;border-top:1px solid #334155;padding-top:12px;">
         <div>Generated on ${new Date().toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' })}</div>
         <div>Confidential studio document</div>
@@ -6195,17 +6416,25 @@ function internalSheet(t) {
     </div>`;
 }
 
+const CLIENT_LINE = {
+  team: { title: 'Animation and CG production', desc: () => 'End-to-end design and execution: pre-production (storyboarding, concept art, script), 3D assets and modeling, rigging, texturing, lighting, keyframe animation, background environments, VFX, rendering and compositing.' },
+  overhead: { title: 'Studio and infrastructure', desc: t => `Studio space, workstations, utilities and production overheads for the ${t.dl}-month schedule.` },
+  audio: { title: 'Original score and sound design', desc: () => 'Original musical composition, sound effect design, foley mastering and stem deliveries.' },
+  ip: { title: 'IP and rights licensing', desc: () => 'Proprietary story IP, universe bible, character designs and concept worldbuilding rights.' },
+  ai: { title: 'AI render and compute', desc: t => `Cloud AI video rendering and compute passes (${t.ai.footageMins} min of footage: draft at ${t.ai.draftTier.label}, main at ${t.ai.finalTier.label}) and studio AI subscriptions.` }
+};
+
 function clientSheet(t) {
   const s = state;
   const cap = 'font-size:11px;text-transform:uppercase;color:#64748b;font-weight:700;letter-spacing:0.05em;';
   const th = 'padding:12px 14px;font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:0.05em;';
-  const productionQuote = t.sell - t.audio - t.ip - t.ai.inr;
+  const sp = clientSplit(s, t);
 
   const row = (title, desc, amount) => `
     <tr style="border-bottom:1px solid #e2e8f0;">
       <td style="padding:12px 14px;font-size:13px;color:#1e293b;font-weight:600;vertical-align:top;">${title}</td>
       <td style="padding:12px 14px;font-size:13px;color:#64748b;line-height:1.5;vertical-align:top;">${desc}</td>
-      <td style="padding:12px 14px;font-size:13px;text-align:right;font-weight:700;color:#0f172a;vertical-align:top;white-space:nowrap;">${inr(amount)}</td>
+      <td style="padding:12px 14px;font-size:13px;text-align:right;font-weight:700;color:#0f172a;vertical-align:top;white-space:nowrap;">${inrFull(amount)}</td>
     </tr>`;
 
   return `
@@ -6237,20 +6466,30 @@ function clientSheet(t) {
       </div>
 
       <div style="margin-bottom:28px;">
-        <div style="font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:0.05em;color:#0f172a;margin-bottom:12px;">Commercial breakdown and deliverables</div>
+        <div style="font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:0.05em;color:#0f172a;margin-bottom:12px;">Price breakdown</div>
         <table style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;">
           <thead>
             <tr style="background:#f1f5f9;border-bottom:1px solid #cbd5e1;text-align:left;">
-              <th style="${th}">Package</th>
+              <th style="${th}">Item</th>
               <th style="${th}">Description</th>
-              <th style="${th}text-align:right;">Quote</th>
+              <th style="${th}text-align:right;">Amount</th>
             </tr>
           </thead>
           <tbody>
-            ${row('Animation and CG production', 'End-to-end design and execution: pre-production (storyboarding, concept art, script), 3D assets and modeling, rigging, texturing, lighting, keyframe animation, background environments, VFX, rendering and compositing.', productionQuote)}
-            ${t.audio > 0 ? row('Original score and sound design', 'Original musical composition, sound effect design, foley mastering and stem deliveries.', t.audio) : ''}
-            ${t.ip > 0 ? row('IP and rights licensing', 'Proprietary story IP, universe bible, character designs and concept worldbuilding rights.', t.ip) : ''}
-            ${t.ai.inr > 0 ? row('AI render and compute', `Cloud AI video rendering and compute passes (${t.ai.footageMins} min of footage: draft at ${t.ai.draftTier.label}, main at ${t.ai.finalTier.label}) and studio AI subscriptions.`, t.ai.inr) : ''}
+            ${sp.lines.map(l => row(CLIENT_LINE[l.key].title, CLIENT_LINE[l.key].desc(t), l.quote)).join('')}
+            <tr style="background:#f8fafc;border-bottom:1px solid #e2e8f0;">
+              <td colspan="2" style="padding:12px 14px;font-size:13px;font-weight:700;color:#1e293b;">Subtotal</td>
+              <td style="padding:12px 14px;font-size:13px;text-align:right;font-weight:700;color:#0f172a;white-space:nowrap;">${inrFull(sp.subtotal)}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #e2e8f0;">
+              <td style="padding:12px 14px;font-size:13px;color:#1e293b;font-weight:600;">Studio profit (${pct(sp.showPct)})</td>
+              <td style="padding:12px 14px;font-size:13px;color:#64748b;line-height:1.5;">Studio margin, ${pct(sp.showPct)} on the subtotal above.</td>
+              <td style="padding:12px 14px;font-size:13px;text-align:right;font-weight:700;color:#0f172a;white-space:nowrap;">${inrFull(sp.profit)}</td>
+            </tr>
+            <tr style="background:#f1f5f9;">
+              <td colspan="2" style="padding:12px 14px;font-size:14px;font-weight:800;color:#0f172a;">Total</td>
+              <td style="padding:12px 14px;font-size:14px;text-align:right;font-weight:800;color:#0f172a;white-space:nowrap;">${inrFull(sp.total)}</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -6258,7 +6497,7 @@ function clientSheet(t) {
       <div style="background:#0f172a;color:#ffffff;border-radius:8px;padding:20px 24px;display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:28px;">
         <div>
           <div style="${cap}color:#94a3b8;">Total project quote</div>
-          <div style="font-size:26px;font-weight:900;color:#38bdf8;">${inr(t.sell)}</div>
+          <div style="font-size:26px;font-weight:900;color:#38bdf8;">${inrFull(sp.total)}</div>
           ${t.isSeries && s.episodes > 0 ? `<div style="font-size:12px;color:#cbd5e1;margin-top:2px;">${inr(t.sellPerEp)} per finished episode (${s.episodes} episodes)</div>` : ''}
         </div>
         <div style="text-align:right;flex-shrink:0;">
