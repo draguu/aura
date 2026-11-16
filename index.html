@@ -2900,6 +2900,71 @@ textarea.form-control {
   color: var(--text-primary);
 }
 
+/* Breakdown dropdowns (Team, AI) */
+.pp-split-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent-color);
+  cursor: pointer;
+}
+
+.pp-split-toggle svg {
+  flex-shrink: 0;
+  transition: transform var(--transition-fast);
+}
+
+.pp-split-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.pp-split tr.item td {
+  padding: 6px 0;
+  font-size: 0.8rem;
+  vertical-align: top;
+  background: var(--bg-tertiary);
+}
+
+.pp-split tr.item td:first-child {
+  padding-left: 10px;
+  white-space: normal;
+}
+
+.pp-split tr.item td:last-child {
+  padding-right: 10px;
+}
+
+.pp-split tr.item small {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+  margin-top: 1px;
+}
+
+/* Proposal type switch in the export dialog */
+.pp-modal-tabs {
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.pp-modal-tabs .pp-seg {
+  max-width: 420px;
+}
+
+@media (max-width: 580px) {
+  .pp-modal-tabs {
+    padding: 8px 12px;
+  }
+}
+
 </style>
 </head>
 <body>
@@ -5183,6 +5248,8 @@ function defaults() {
     toggleProfit: true,
     profitPct: 150,
     clientProfitPct: 30,
+    clientAudioMarkupPct: 10,
+    proposalMode: 'normal',
     toggleCommission: false,
     commissionPct: 0
   };
@@ -5222,6 +5289,7 @@ function normalize(src) {
   p.contentType = p.contentType === 'movie' ? 'movie' : 'series';
   if (!MODES.includes(p.musicMode)) p.musicMode = 'fixed';
   if (!MODES.includes(p.sfxMode)) p.sfxMode = 'fixed';
+  if (p.proposalMode !== 'detailed') p.proposalMode = 'normal';
 
   // Work week: the old on/off switch meant "use Mon–Fri" when off
   if (b.toggleWorkWeek === false || !WORK_WEEK[p.workWeek]) p.workWeek = b.toggleWorkWeek === false ? 'mon-fri' : 'mon-sat';
@@ -5313,33 +5381,85 @@ function audioLine(on, mode, fixed, perMin, perEp, totalMins, epCount) {
 }
 
 /**
- * Client price breakdown: the selling price is split into the same cost
- * lines as the summary, plus a profit line the size the user chooses.
- * The shown profit is a markup on the shown costs (30% means profit is 30%
- * of the subtotal above it). The rest of the real profit is spread across
- * the cost lines in proportion to what each one actually costs.
+ * Client price breakdown. The selling price is split into the summary's cost
+ * lines plus a profit line the size the user chooses (a markup on the shown
+ * costs: 30% means profit is 30% of the subtotal above it).
+ *
+ * The rest of the real profit is hidden like this:
+ *   - AI and IP charges stay at their real cost
+ *   - Audio gets a small markup (clientAudioMarkupPct)
+ *   - everything else goes into Team and Studio overhead, in proportion to
+ *     their real costs, and each salary is scaled up by the same factor
+ * Every line is built from whole-rupee parts, and profit takes the rounding,
+ * so the table always adds up exactly to the selling price.
  */
-const SPLIT_LINES = [
-  { key: 'team', label: 'Team', get: t => t.teamCost },
-  { key: 'overhead', label: 'Studio overhead', get: t => t.overheadTotal },
-  { key: 'audio', label: 'Audio', get: t => t.audio },
-  { key: 'ip', label: 'IP charges', get: t => t.ip },
-  { key: 'ai', label: 'AI', get: t => t.ai.inr }
-];
+const splitPlural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 function clientSplit(p, t) {
   const showPct = Math.max(0, p.clientProfitPct || 0);
   const total = Math.round(t.sell);
   const target = total / (1 + showPct / 100);
-  const lines = SPLIT_LINES
-    .map(l => ({ key: l.key, label: l.label, cost: l.get(t) }))
-    .filter(l => l.cost > 0);
-  const base = lines.reduce((s, l) => s + l.cost, 0);
-  lines.forEach(l => { l.quote = base > 0 ? Math.round((l.cost / base) * target) : 0; });
+  const extra = target - t.baseCost; // profit that has to be hidden in the lines
+
+  // AI: at cost, itemised
+  const a = t.ai;
+  const aiItems = [];
+  const aiItem = (label, detail, usdAmount) => {
+    if (usdAmount > 0) {
+      const v = Math.round(usdAmount * a.rate);
+      aiItems.push({ label, detail, cost: v, quote: v });
+    }
+  };
+  const footage = a.footageMins + (p.aiFootageSecs ? ` min ${p.aiFootageSecs}s` : ' min');
+  aiItem(`${a.draftTier.label} draft`, `${splitPlural(a.draftPasses, 'pass', 'passes')} · ${footage} of footage`, a.draftUsd);
+  aiItem(`${a.finalTier.label} final`, `${splitPlural(a.finalPasses, 'pass', 'passes')} · ${footage} of footage`, a.finalUsd);
+  aiItem('Claude', `${splitPlural(Math.floor(p.aiSubClaudeCount), 'seat', 'seats')} × ${splitPlural(Math.floor(p.aiSubClaudeMonths), 'month', 'months')}`, a.claudeUsd);
+  aiItem('ChatGPT', `${splitPlural(Math.floor(p.aiSubChatGptCount), 'seat', 'seats')} × ${splitPlural(Math.floor(p.aiSubChatGptMonths), 'month', 'months')}`, a.chatGptUsd);
+  const aiTotal = aiItems.reduce((s, i) => s + i.quote, 0);
+
+  // Audio: small markup, never more than the profit there is to hide
+  const audioMarkup = extra > 0 ? Math.min(t.audio * (Math.max(0, p.clientAudioMarkupPct || 0) / 100), extra) : 0;
+  let audioQuote = t.audio + audioMarkup;
+
+  // Team and overhead take the rest
+  const flexCost = t.teamCost + t.overheadTotal;
+  let pool = extra - audioMarkup;
+  if (flexCost <= 0 && t.audio > 0) { audioQuote += pool; pool = 0; }
+  const factor = flexCost > 0 ? Math.max(0, (flexCost + pool) / flexCost) : 1;
+
+  const active = p.toggleTeam ? p.team.filter(m => m.enabled !== false) : [];
+  const teamItems = active.map(m => {
+    const months = memberMonths(p, m);
+    const salary = Math.round((m.salary * factor) / 100) * 100; // neat client-facing salary
+    return {
+      label: m.role,
+      count: m.count,
+      months,
+      salary,
+      detail: `${splitPlural(m.count, 'person', 'people')} × ${inrFull(salary)}/month × ${splitPlural(months, 'month', 'months')}`,
+      short: `${m.count} × ${inrFull(salary)}/mo × ${months} mo`,
+      cost: m.salary * m.count * months,
+      quote: salary * m.count * months
+    };
+  }).filter(i => i.cost > 0);
+  const teamQuote = teamItems.reduce((s, i) => s + i.quote, 0);
+
+  const overheadMonthly = Math.round((t.overheadMo * factor) / 100) * 100;
+  const overheadQuote = overheadMonthly * t.dl;
+
+  const lines = [
+    { key: 'team', label: 'Team', cost: t.teamCost, quote: teamQuote, items: teamItems },
+    { key: 'overhead', label: 'Studio overhead', cost: t.overheadTotal, quote: overheadQuote, monthly: overheadMonthly },
+    { key: 'audio', label: 'Audio', cost: t.audio, quote: Math.round(audioQuote) },
+    { key: 'ip', label: 'IP charges', cost: t.ip, quote: Math.round(t.ip) },
+    { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems }
+  ].filter(l => l.cost > 0);
+
   const subtotal = lines.reduce((s, l) => s + l.quote, 0);
-  const profit = total - subtotal; // whole rupees, so the table adds up exactly
   return {
-    showPct, lines, subtotal, profit, total,
+    showPct, lines, subtotal, total,
+    profit: total - subtotal,
+    hidden: Math.max(0, extra),
     realProfit: t.sell - t.baseCost,
     realPct: t.baseCost > 0 ? ((t.sell - t.baseCost) / t.baseCost) * 100 : 0,
     belowCost: subtotal < Math.round(t.baseCost) - 1
@@ -5466,6 +5586,7 @@ let saveStateToLocalStorage = null;
 let root = null;
 let outs = null;
 let draftTimer = null;
+const splitOpen = { team: false, ai: false };
 
 const INT_KEYS = new Set([
   'episodes', 'aiDraftIterations', 'aiSubClaudeCount', 'aiSubClaudeMonths',
@@ -5765,6 +5886,9 @@ function shellHtml() {
           <span class="pp-hint">%</span>
         </div>
       </div>
+      <div class="pp-fields">
+        ${num('clientAudioMarkupPct', 'Audio markup on quote (%)', 'min="0" step="1"')}
+      </div>
       <table class="pp-split">
         <thead><tr><th>Item</th><th>Your cost</th><th>On quote</th></tr></thead>
         <tbody data-out="splitRows"></tbody>
@@ -6024,14 +6148,25 @@ function render() {
   out('barSell', inr(t.sell));
 
   const sp = clientSplit(s, t);
-  out('splitRows', sp.lines.map(l =>
-    `<tr><td>${l.label}</td><td>${inr(l.cost)}</td><td>${inr(l.quote)}</td></tr>`).join('') +
+  const rowsHtml = sp.lines.map(l => {
+    if (!l.items || !l.items.length) {
+      return `<tr><td>${l.label}</td><td>${inr(l.cost)}</td><td>${inr(l.quote)}</td></tr>`;
+    }
+    const open = !!splitOpen[l.key];
+    const head = `<tr class="grp"><td><button type="button" class="pp-split-toggle" data-split="${l.key}" aria-expanded="${open}">` +
+      `${l.label}<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button></td>` +
+      `<td>${inr(l.cost)}</td><td>${inr(l.quote)}</td></tr>`;
+    const items = open ? l.items.map(i =>
+      `<tr class="item"><td><div>${esc(i.label)}</div><small>${i.short || i.detail}</small></td><td>${inr(i.cost)}</td><td>${inr(i.quote)}</td></tr>`).join('') : '';
+    return head + items;
+  }).join('');
+  out('splitRows', rowsHtml +
     `<tr class="sub"><td>Subtotal</td><td>${inr(t.baseCost)}</td><td>${inr(sp.subtotal)}</td></tr>` +
     `<tr class="profit"><td>Profit (${pct(sp.showPct)})</td><td>${inr(sp.realProfit)}</td><td>${inr(sp.profit)}</td></tr>` +
     `<tr class="total"><td>Total</td><td>${inr(t.sell)}</td><td>${inr(sp.total)}</td></tr>`, true);
   out('splitNote', t.baseCost <= 0 ? '' : sp.belowCost
-    ? `<span class="warn">This shows more profit than you actually make (${pct(sp.realPct)} on costs), so the cost lines on the quote are lower than your real costs.</span>`
-    : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. The quote shows ${pct(sp.showPct)} and spreads the remaining ${inr(sp.realProfit - sp.profit)} across the cost lines.`, true);
+    ? `<span class="warn">This shows more profit than you actually make (${pct(sp.realPct)} on costs), so Team and Studio overhead are below your real costs on the quote.</span>`
+    : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. The quote shows ${pct(sp.showPct)}; the other ${inr(sp.hidden)} goes into Team and Studio overhead, with a small share in Audio. AI and IP stay at cost.`, true);
 
   queueDraftSave();
 }
@@ -6191,6 +6326,14 @@ function addMember() {
 }
 
 function onClick(e) {
+  const splitBtn = e.target.closest('[data-split]');
+  if (splitBtn) {
+    const key = splitBtn.dataset.split;
+    splitOpen[key] = !splitOpen[key];
+    render();
+    return;
+  }
+
   const segBtn = e.target.closest('[data-seg] button');
   if (segBtn) {
     state[segBtn.parentElement.dataset.seg] = segBtn.dataset.val;
@@ -6418,11 +6561,45 @@ function internalSheet(t) {
 
 const CLIENT_LINE = {
   team: { title: 'Animation and CG production', desc: () => 'End-to-end design and execution: pre-production (storyboarding, concept art, script), 3D assets and modeling, rigging, texturing, lighting, keyframe animation, background environments, VFX, rendering and compositing.' },
-  overhead: { title: 'Studio and infrastructure', desc: t => `Studio space, workstations, utilities and production overheads for the ${t.dl}-month schedule.` },
+  overhead: { title: 'Studio overhead expenses', desc: t => `Studio space rent, rented workstations and the monthly running costs of the studio for the ${t.dl}-month schedule.` },
   audio: { title: 'Original score and sound design', desc: () => 'Original musical composition, sound effect design, foley mastering and stem deliveries.' },
   ip: { title: 'IP and rights licensing', desc: () => 'Proprietary story IP, universe bible, character designs and concept worldbuilding rights.' },
-  ai: { title: 'AI render and compute', desc: t => `Cloud AI video rendering and compute passes (${t.ai.footageMins} min of footage: draft at ${t.ai.draftTier.label}, main at ${t.ai.finalTier.label}) and studio AI subscriptions.` }
+  ai: { title: 'AI tools and rendering', desc: () => 'AI video generation passes and AI tool subscriptions, billed at cost.' }
 };
+
+// Detailed proposal rows: each line as a heading with its parts underneath
+function detailedRows(sp, t) {
+  const td = 'padding:10px 14px;font-size:13px;vertical-align:top;';
+  const amount = 'text-align:right;white-space:nowrap;';
+  const group = (title, desc, value) => `
+    <tr style="background:#f8fafc;border-top:1px solid #cbd5e1;border-bottom:1px solid #e2e8f0;">
+      <td style="${td}font-weight:800;color:#0f172a;">${title}</td>
+      <td style="${td}color:#64748b;line-height:1.5;">${desc}</td>
+      <td style="${td}${amount}font-weight:800;color:#0f172a;">${inrFull(value)}</td>
+    </tr>`;
+  const item = (label, detail, value) => `
+    <tr style="border-bottom:1px solid #f1f5f9;">
+      <td style="${td}padding-left:28px;color:#1e293b;">${esc(label)}</td>
+      <td style="${td}color:#475569;">${detail}</td>
+      <td style="${td}${amount}color:#334155;">${inrFull(value)}</td>
+    </tr>`;
+
+  return sp.lines.map(l => {
+    if (l.key === 'team') {
+      const people = l.items.reduce((s, i) => s + i.count, 0);
+      return group('Team', `${splitPlural(people, 'artist', 'artists')} across ${splitPlural(l.items.length, 'role', 'roles')}`, l.quote) +
+        l.items.map(i => item(i.label, i.detail, i.quote)).join('');
+    }
+    if (l.key === 'overhead') {
+      return group('Overhead expenses', `Space rent, rented computers and the monthly running costs of the studio · ${inrFull(l.monthly)}/month × ${splitPlural(t.dl, 'month', 'months')}`, l.quote);
+    }
+    if (l.key === 'ai') {
+      return group('AI', 'AI video generation and AI tool subscriptions, billed at cost', l.quote) +
+        l.items.map(i => item(i.label, i.detail, i.quote)).join('');
+    }
+    return group(CLIENT_LINE[l.key].title, CLIENT_LINE[l.key].desc(t), l.quote);
+  }).join('');
+}
 
 function clientSheet(t) {
   const s = state;
@@ -6442,7 +6619,7 @@ function clientSheet(t) {
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;border-bottom:2px solid #0f172a;padding-bottom:20px;margin-bottom:28px;">
         <div>
           <div style="font-size:22px;font-weight:900;letter-spacing:-0.5px;color:#0f172a;text-transform:uppercase;">Weybec Animation Studio</div>
-          <div style="font-size:12px;color:#64748b;margin-top:4px;">Commercial production proposal and deliverables scope</div>
+          <div style="font-size:12px;color:#64748b;margin-top:4px;">${s.proposalMode === 'detailed' ? 'Detailed production proposal' : 'Commercial production proposal and deliverables scope'}</div>
         </div>
         <div style="text-align:right;flex-shrink:0;">
           <div style="${cap}">Date of quotation</div>
@@ -6459,7 +6636,7 @@ function clientSheet(t) {
           </div>
         </div>
         <div style="text-align:right;flex-shrink:0;">
-          <div style="${cap}margin-bottom:4px;">Production schedule</div>
+          <div style="${cap}margin-bottom:4px;">${s.proposalMode === 'detailed' ? 'Time' : 'Production schedule'}</div>
           <div style="font-size:16px;font-weight:800;color:#0f172a;">${t.dl} calendar months</div>
           <div style="font-size:12px;color:#0284c7;font-weight:700;">Rate: ${inrUnit(t.sellPerMin)} / min</div>
         </div>
@@ -6476,7 +6653,7 @@ function clientSheet(t) {
             </tr>
           </thead>
           <tbody>
-            ${sp.lines.map(l => row(CLIENT_LINE[l.key].title, CLIENT_LINE[l.key].desc(t), l.quote)).join('')}
+            ${s.proposalMode === 'detailed' ? detailedRows(sp, t) : sp.lines.map(l => row(CLIENT_LINE[l.key].title, CLIENT_LINE[l.key].desc(t), l.quote)).join('')}
             <tr style="background:#f8fafc;border-bottom:1px solid #e2e8f0;">
               <td colspan="2" style="padding:12px 14px;font-size:13px;font-weight:700;color:#1e293b;">Subtotal</td>
               <td style="padding:12px 14px;font-size:13px;text-align:right;font-weight:700;color:#0f172a;white-space:nowrap;">${inrFull(sp.subtotal)}</td>
@@ -6532,7 +6709,7 @@ async function exportSheet(format, kind, button) {
   button.textContent = 'Preparing…';
   const background = kind === 'client' ? '#ffffff' : '#0f172a';
   const base = (state.projectName || 'production_plan').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'production_plan';
-  const filename = `${base}_${kind === 'client' ? 'client_quote' : 'budget_snapshot'}`;
+  const filename = `${base}_${kind === 'client' ? (state.proposalMode === 'detailed' ? 'detailed_proposal' : 'proposal') : 'budget_snapshot'}`;
 
   try {
     if (typeof html2canvas === 'undefined') {
@@ -6584,6 +6761,10 @@ function openExport(kind) {
         <h3>${kind === 'client' ? 'Client quote' : 'Internal cost sheet'}</h3>
         <button type="button" class="pp-modal-close" data-x aria-label="Close">&times;</button>
       </div>
+      ${kind === 'client' ? `<div class="pp-modal-tabs"><div class="pp-seg" data-proposal>
+        <button type="button" data-val="normal">Normal proposal</button>
+        <button type="button" data-val="detailed">Detailed proposal</button>
+      </div></div>` : ''}
       <div class="pp-modal-body">${kind === 'client' ? clientSheet(t) : internalSheet(t)}</div>
       <div class="pp-modal-foot">
         <button type="button" class="btn btn-secondary" data-export="jpg">Download image</button>
@@ -6593,12 +6774,29 @@ function openExport(kind) {
 
   modal.addEventListener('click', e => {
     if (e.target === modal || e.target.closest('[data-x]')) { closeExport(); return; }
+    const modeBtn = e.target.closest('[data-proposal] button');
+    if (modeBtn) {
+      state.proposalMode = modeBtn.dataset.val;
+      syncProposalTabs(modal);
+      modal.querySelector('.pp-modal-body').innerHTML = clientSheet(compute(state));
+      queueDraftSave();
+      return;
+    }
     const btn = e.target.closest('[data-export]');
     if (btn) exportSheet(btn.dataset.export, kind, btn);
   });
   document.addEventListener('keydown', onExportKey);
+  syncProposalTabs(modal);
   document.body.appendChild(modal);
   modal.querySelector('[data-x]').focus();
+}
+
+function syncProposalTabs(modal) {
+  modal.querySelectorAll('[data-proposal] button').forEach(b => {
+    const on = b.dataset.val === state.proposalMode;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
 }
 
 function onExportKey(e) {
