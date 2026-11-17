@@ -5539,13 +5539,15 @@ function normalize(src) {
     role: String(r.role || ''),
     count: Math.max(1, parseInt(r.count) || 1),
     salary: Math.max(0, parseFloat(r.salary) || 0),
-    months: Math.max(1, parseInt(r.months) || 1)
+    months: Math.max(1, parseInt(r.months) || 1),
+    dept: DEPTS[r.dept] ? r.dept : 'team'
   }));
   p.quoteExtras = (Array.isArray(b.quoteExtras) ? b.quoteExtras : []).filter(Boolean).map(x => ({
     id: x.id || newMemberId(),
     name: String(x.name || ''),
     note: String(x.note || ''),
-    amount: Math.max(0, parseFloat(x.amount) || 0)
+    amount: Math.max(0, parseFloat(x.amount) || 0),
+    dept: DEPTS[x.dept] ? x.dept : 'own'
   }));
 
   // Work week: the old on/off switch meant "use Mon–Fri" when off
@@ -5665,6 +5667,21 @@ const QUOTE_LINES = [
   { key: 'ai', label: 'AI' },
   { key: 'aivo', label: 'AI VO' }
 ];
+
+// Departments an extra role or item can be placed in on the quote
+const DEPTS = {
+  team:       { label: 'Creative team' },
+  management: { label: 'Production management', title: 'Production management', sub: 'Producer, coordination and scheduling' },
+  aiprod:     { label: 'AI production',          title: 'AI production team',    sub: 'AI artists and generation operators' },
+  post:       { label: 'Post-production',        title: 'Post-production',       sub: 'Edit, compositing, colour and finishing' },
+  tech:       { label: 'Technology & pipeline',  title: 'Technology & pipeline', sub: 'Pipeline, render, storage and IT' },
+  admin:      { label: 'Admin & legal',          title: 'Admin & legal',         sub: 'Accounts, contracts, legal and support' },
+  audio:      { label: 'Music and sound' }
+};
+const DEPT_LINES = ['management', 'aiprod', 'post', 'tech', 'admin'];
+
+// Round the overhead down to a figure that looks budgeted, not calculated
+const roundOverhead = v => v <= 0 ? 0 : v >= 10000000 ? Math.floor(v / 10000) * 10000 : v >= 10000 ? Math.floor(v / 1000) * 1000 : Math.floor(v / 100) * 100;
 
 function countQuoteEdits(p) {
   return Object.keys(p.quoteLines || {}).length + Object.keys(p.quoteSalaries || {}).length +
@@ -5804,14 +5821,19 @@ function clientSplit(p, t) {
   const { items: audioItems, total: audioQuote } = audioBreakdown(p, t, audioTarget, has('audio'));
 
   // Extra items and extra team roles, exactly as typed
-  const extras = (p.quoteExtras || []).filter(x => x.amount > 0).map(x => ({
+  const allExtras = (p.quoteExtras || []).filter(x => x.amount > 0);
+  const extras = allExtras.filter(x => x.dept === 'own' || !DEPTS[x.dept]).map(x => ({
     key: 'extra:' + x.id, label: x.name.trim() || 'Additional item', sub: x.note.trim(),
     cost: 0, quote: Math.round(x.amount), edited: true
   }));
-  const extrasTotal = extras.reduce((s, x) => s + x.quote, 0);
-  const roles = (p.quoteRoles || []).filter(r => r.salary > 0)
-    .map(r => member(r.role.trim() || 'Team member', r.count, r.months, Math.round(r.salary), 0, true));
-  const rolesTotal = roles.reduce((s, r) => s + r.quote, 0);
+  const extrasTotal = allExtras.reduce((s, x) => s + Math.round(x.amount), 0);
+  const allRolesTyped = (p.quoteRoles || []).filter(r => r.salary > 0).map(r =>
+    Object.assign(member(r.role.trim() || 'Team member', r.count, r.months, Math.round(r.salary), 0, true), { dept: DEPTS[r.dept] ? r.dept : 'team' }));
+  const roles = allRolesTyped.filter(r => r.dept === 'team');
+  const rolesTotal = allRolesTyped.reduce((s, r) => s + r.quote, 0);
+  // Roles and items placed in a department
+  const deptItems = k => allRolesTyped.filter(r => r.dept === k).concat(
+    allExtras.filter(x => x.dept === k).map(x => ({ label: x.name.trim() || 'Additional item', detail: x.note.trim(), short: x.note.trim(), cost: 0, quote: Math.round(x.amount), edited: true })));
 
   // Team members: founders and edited salaries are fixed, the rest scale
   const active = p.toggleTeam ? p.team.filter(m => m.enabled !== false) : [];
@@ -5847,7 +5869,7 @@ function clientSplit(p, t) {
 
   // Project Coordinator and QC team for what is still left
   const added = [];
-  const allRoles = active.map(m => m.role).concat(roles.map(r => r.label));
+  const allRoles = active.map(m => m.role).concat(allRolesTyped.map(r => r.label));
   if (left > 0 && !allRoles.some(r => /coordinator/i.test(r))) {
     const salary = Math.min(COORDINATOR_SALARY, roundSalary(left / dl));
     if (salary >= 20000) {
@@ -5855,27 +5877,37 @@ function clientSplit(p, t) {
       left -= salary * dl;
     }
   }
-  // Overhead takes the rest, unless the user fixed it
   const allTeam = teamItems.concat(roles, added);
   const teamQuote = allTeam.reduce((s, i) => s + i.quote, 0);
-  const overheadQuote = overheadAuto
-    ? Math.max(0, target - aiTotal - aiVoQuote - ipQuote - audioQuote - extrasTotal - teamQuote)
-    : overheadFixed;
+  const audioExtra = deptItems('audio');
+  const audioAll = audioItems.concat(audioExtra);
+  const audioLineQuote = audioQuote + audioExtra.reduce((s, i) => s + i.quote, 0);
+  const deptLines = DEPT_LINES.map(k => {
+    const items = deptItems(k);
+    return { key: 'dept:' + k, label: DEPTS[k].title, sub: DEPTS[k].sub, cost: 0, quote: items.reduce((s, i) => s + i.quote, 0), items, edited: true };
+  }).filter(l => l.quote > 0);
 
-  const lines = [
-    { key: 'team', label: 'Team', cost: t.teamCost, quote: teamQuote, items: allTeam },
-    { key: 'overhead', label: 'Studio overhead', cost: t.overheadTotal, quote: overheadQuote, edited: !overheadAuto },
-    { key: 'audio', label: 'Audio', cost: t.audio, quote: audioQuote, items: audioItems, edited: has('audio') },
+  const others = [
+    { key: 'team', label: 'Team', cost: t.teamCost, quote: teamQuote, items: allTeam }
+  ].concat(deptLines, [
+    { key: 'audio', label: 'Audio', cost: t.audio, quote: audioLineQuote, items: audioAll, edited: has('audio') || audioExtra.length > 0 },
     { key: 'ip', label: 'IP charges', cost: t.ip, quote: ipQuote, edited: has('ip') },
     { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems, edited: has('ai') },
     { key: 'aivo', label: 'AI VO', cost: v.inr, quote: aiVoQuote, items: aiVoItems, edited: has('aivo') }
-  ].concat(extras).filter(l => l.cost > 0 || l.quote > 0);
+  ], extras);
+
+  // Overhead takes the rest (as a round figure), unless the user fixed it
+  const othersTotal = others.reduce((s, l) => s + l.quote, 0);
+  const overheadQuote = overheadAuto ? roundOverhead(target - othersTotal) : overheadFixed;
+  const overheadLine = { key: 'overhead', label: 'Studio overhead', cost: t.overheadTotal, quote: overheadQuote, edited: !overheadAuto };
+  const lines = [others[0]].concat(deptLines, [overheadLine], others.slice(1 + deptLines.length))
+    .filter(l => l.cost > 0 || l.quote > 0);
 
   const subtotal = lines.reduce((s, l) => s + l.quote, 0);
   const profit = total - subtotal;
   return {
     askPct, lines, subtotal, total, profit, added, overheadAuto,
-    exact: subtotal === target,
+    exact: overheadAuto ? (target - subtotal >= 0 && target - subtotal < 10000 && (overheadQuote > 0 || subtotal === target)) : subtotal === target,
     edits: countQuoteEdits(p),
     showPct: subtotal > 0 ? (profit / subtotal) * 100 : 0,
     salaryRisePct: (factor - 1) * 100,
@@ -6455,7 +6487,12 @@ function memberHtml(m) {
 function out(name, text, asHtml) {
   const list = outs.get(name);
   if (!list) return;
-  list.forEach(el => { if (asHtml) el.innerHTML = text; else el.textContent = text; });
+  list.forEach(el => {
+    // Skip unchanged content, so a tap on a row is never lost to a redraw
+    if (el._ppLast === text) return;
+    el._ppLast = text;
+    if (asHtml) el.innerHTML = text; else el.textContent = text;
+  });
 }
 
 function buildTeam() {
@@ -6722,6 +6759,9 @@ function buildQuoteEditor() {
         <input type="text" class="form-control" data-q="role" data-field="role" value="${esc(r.role)}" placeholder="Role name" aria-label="Role">
         <button type="button" class="pp-icon-btn" data-act="q-remove-role" data-id="${esc(r.id)}" aria-label="Remove role">${REMOVE_ICON}</button>
       </div>
+      <label class="pp-field"><span>Department</span><select class="form-select" data-q="role" data-field="dept">
+        ${Object.keys(DEPTS).map(k => `<option value="${k}" ${r.dept === k ? 'selected' : ''}>${DEPTS[k].label}</option>`).join('')}
+      </select></label>
       <div class="pp-fields pp-fields-3">
         <label class="pp-field"><span>People</span>${qInput('data-q="role" data-field="count" step="1" min="1"', r.count)}</label>
         <label class="pp-field"><span>₹ / month</span>${qInput('data-q="role" data-field="salary"', r.salary || '')}</label>
@@ -6734,6 +6774,10 @@ function buildQuoteEditor() {
         <input type="text" class="form-control" data-q="extra" data-field="name" value="${esc(x.name)}" placeholder="Item name" aria-label="Item name">
         <button type="button" class="pp-icon-btn" data-act="q-remove-extra" data-id="${esc(x.id)}" aria-label="Remove item">${REMOVE_ICON}</button>
       </div>
+      <label class="pp-field"><span>Show under</span><select class="form-select" data-q="extra" data-field="dept">
+        <option value="own" ${x.dept === 'own' ? 'selected' : ''}>Its own line</option>
+        ${Object.keys(DEPTS).filter(k => k !== 'team').map(k => `<option value="${k}" ${x.dept === k ? 'selected' : ''}>${DEPTS[k].label}</option>`).join('')}
+      </select></label>
       <div class="pp-two">
         <input type="text" class="form-control" data-q="extra" data-field="note" value="${esc(x.note)}" placeholder="Short note (optional)" aria-label="Short note">
         ${qInput('data-q="extra" data-field="amount" placeholder="Amount (₹)" aria-label="Amount"', x.amount || '')}
@@ -6751,9 +6795,9 @@ function buildQuoteEditor() {
       ${salaryRows}
     </div>
     <div class="pp-qgroup">
-      <div class="pp-qhead">Extra team roles</div>
+      <div class="pp-qhead">Extra roles</div>
       ${roleRows}
-      <button type="button" class="pp-link" data-act="q-add-role">+ Add team role</button>
+      <button type="button" class="pp-link" data-act="q-add-role">+ Add role</button>
     </div>
     <div class="pp-qgroup">
       <div class="pp-qhead">Extra items</div>
@@ -6802,7 +6846,7 @@ function onQuoteInput(el, committed) {
     const item = box && list.find(x => String(x.id) === box.dataset.qid);
     if (!item) return;
     const f = el.dataset.field;
-    if (f === 'role' || f === 'name' || f === 'note') item[f] = el.value;
+    if (f === 'role' || f === 'name' || f === 'note' || f === 'dept') item[f] = el.value;
     else if (f === 'count' || f === 'months') { if (n >= 1) item[f] = Math.floor(n); if (committed) el.value = item[f]; }
     else { item[f] = n >= 0 ? n : 0; }
   }
@@ -7022,7 +7066,7 @@ function onClick(e) {
   switch (actEl.dataset.act) {
     case 'add-member': addMember(); break;
     case 'q-add-role':
-      state.quoteRoles.push({ id: newMemberId(), role: '', count: 1, salary: 0, months: state.deadlineMonths });
+      state.quoteRoles.push({ id: newMemberId(), role: '', count: 1, salary: 0, months: state.deadlineMonths, dept: 'team' });
       render();
       focusLast('[data-q="role"][data-field="role"]');
       break;
@@ -7031,7 +7075,7 @@ function onClick(e) {
       render();
       break;
     case 'q-add-extra':
-      state.quoteExtras.push({ id: newMemberId(), name: '', note: '', amount: 0 });
+      state.quoteExtras.push({ id: newMemberId(), name: '', note: '', amount: 0, dept: 'own' });
       render();
       focusLast('[data-q="extra"][data-field="name"]');
       break;
