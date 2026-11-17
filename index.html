@@ -7472,8 +7472,7 @@ function clientSheet(t) {
 
         ${sp.addon ? `
         <div style="margin-top:30px;">
-          <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:${P.faint};">Optional add-on</div>
-          <div style="font-size:12px;color:${P.muted};margin:4px 0 6px;">Priced separately. Removing it does not change the project total above.</div>
+          <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:${P.faint};margin-bottom:6px;">Optional add-on</div>
           ${section(sp.addon, sp.lines.length)}
           <div style="display:flex;justify-content:space-between;align-items:center;gap:16px;border-top:2px solid ${P.ink};padding-top:14px;margin-top:2px;">
             <span style="font-size:14px;font-weight:700;color:${P.ink};">Total with audio</span>
@@ -7482,7 +7481,7 @@ function clientSheet(t) {
         </div>` : ''}
 
         <div style="margin-top:22px;font-size:11px;color:${P.faint};line-height:1.6;">
-          All amounts in INR. Taxes extra as applicable. Timeline starts on signing and receipt of the advance.
+          All amounts in INR. Taxes extra as applicable.
         </div>
       </div>
     </div>`;
