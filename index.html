@@ -5461,6 +5461,7 @@ function defaults() {
     profitPct: 150,
     clientProfitPct: 30,
     clientAudioMarkupPct: 10,
+    clientAudioAtCost: false,
     clientSalaryCapPct: 50,
     proposalMode: 'normal',
     quoteLines: {},
@@ -5724,6 +5725,7 @@ function clientSplit(p, t) {
   }] : [];
   const room = target - Math.round(t.baseCost);
   const audioQuote = has('audio') ? Math.round(ov.audio)
+    : p.clientAudioAtCost ? Math.round(t.audio)
     : Math.round(t.audio) + (room > 0 ? Math.floor(Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, room - 1)) : 0);
 
   // Extra items and extra team roles, exactly as typed
@@ -6301,8 +6303,9 @@ function shellHtml() {
       </div>
       <div class="pp-fields">
         ${num('clientSalaryCapPct', 'Max salary increase (%)', 'min="0" step="1"')}
-        ${num('clientAudioMarkupPct', 'Audio markup (%)', 'min="0" step="1"')}
+        <div data-dim="clientAudioMarkupOn">${num('clientAudioMarkupPct', 'Audio markup (%)', 'min="0" step="1"')}</div>
       </div>
+      <div class="pp-row"><span class="pp-row-title">Keep audio at real cost</span>${sw('clientAudioAtCost', 'Keep audio at real cost on the quote')}</div>
       <table class="pp-split">
         <thead><tr><th>Item</th><th>Your cost</th><th>On quote</th></tr></thead>
         <tbody data-out="splitRows"></tbody>
@@ -6479,6 +6482,7 @@ function syncControls() {
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
   });
+  state.clientAudioMarkupOn = !state.clientAudioAtCost;
   root.querySelectorAll('[data-dim]').forEach(el => el.classList.toggle('is-off', !state[el.dataset.dim]));
   root.querySelectorAll('[data-show]').forEach(el => {
     const [key, value] = el.dataset.show.split(':');
@@ -6622,7 +6626,7 @@ function render() {
     : sp.belowCost
       ? `<span class="warn">This shows more profit than you actually make (${pct(sp.realPct)} on costs), so the quote lines add up to less than your real costs.</span>`
       : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. ${inr(sp.hidden)} is placed in the quote${Math.round(sp.salaryRisePct) > 0 ? ': salaries up ' + pct(Math.round(sp.salaryRisePct)) + ',' : ':'}` +
-        `${sp.added.length ? ' ' + sp.added.map(i => i.label + (i.count > 1 ? ' (' + i.count + ')' : '')).join(' and ') + ' added to the team,' : ''} the rest in ${[sp.overheadAuto ? 'overhead' : '', state.quoteLines.audio === undefined ? 'audio' : ''].filter(Boolean).join(' and ') || 'the profit line'}.${editsNote}`, true);
+        `${sp.added.length ? ' ' + sp.added.map(i => i.label + (i.count > 1 ? ' (' + i.count + ')' : '')).join(' and ') + ' added to the team,' : ''} the rest in ${[sp.overheadAuto ? 'overhead' : '', state.quoteLines.audio === undefined && !state.clientAudioAtCost ? 'audio' : ''].filter(Boolean).join(' and ') || 'the profit line'}.${editsNote}`, true);
   out('qeditSum', sp.edits ? plural(sp.edits, 'edit') : '');
   refreshQuoteEditor(sp);
 
