@@ -5407,6 +5407,16 @@ function defaults() {
     voFixedAmt: 50000,
     voPerMinRate: 2000,
     voPerEpRate: 5000,
+    toggleSongs: false,
+    songMode: "perSong",
+    songCount: 2,
+    songRate: 50000,
+    songFixedAmt: 100000,
+    toggleMix: false,
+    mixMode: "perMinute",
+    mixFixedAmt: 75000,
+    mixPerMinRate: 1000,
+    mixPerEpRate: 3000,
 
     toggleOverhead: false,
     toggleRentSpace: true,
@@ -5436,6 +5446,7 @@ function defaults() {
     aiVoMins: 140,
     aiVoManual: false,
     aiVoTakes: 4,
+    aiVoMonths: 0,
     toggleAiSubs: true,
     toggleSubClaude: true,
     aiSubClaudeCount: 1,
@@ -5496,6 +5507,10 @@ function normalize(src) {
   if (!MODES.includes(p.musicMode)) p.musicMode = 'fixed';
   if (!MODES.includes(p.sfxMode)) p.sfxMode = 'fixed';
   if (!MODES.includes(p.voMode)) p.voMode = 'perEpisode';
+  if (!MODES.includes(p.mixMode)) p.mixMode = 'perMinute';
+  if (p.songMode !== 'fixed') p.songMode = 'perSong';
+  p.songCount = Math.max(0, Math.floor(p.songCount) || 0);
+  p.aiVoMonths = Math.max(0, Math.floor(p.aiVoMonths) || 0);
   if (!ELEVEN_PLANS[p.aiVoPlan]) p.aiVoPlan = 'pro';
   p.aiVoTakes = Math.max(1, Math.floor(p.aiVoTakes) || 1);
   if (p.proposalMode !== 'detailed') p.proposalMode = 'normal';
@@ -5677,6 +5692,13 @@ function clientSplit(p, t) {
   aiItem(`${a.finalTier.label} final`, `${splitPlural(a.finalPasses, 'pass', 'passes')} · ${footage}`, a.finalUsd);
   aiItem('Claude', `${splitPlural(Math.floor(p.aiSubClaudeCount), 'seat', 'seats')} × ${Math.floor(p.aiSubClaudeMonths)} mo`, a.claudeUsd);
   aiItem('ChatGPT', `${splitPlural(Math.floor(p.aiSubChatGptCount), 'seat', 'seats')} × ${Math.floor(p.aiSubChatGptMonths)} mo`, a.chatGptUsd);
+  // Match the rounded AI total exactly (items are rounded one by one)
+  if (aiItems.length) {
+    const drift = Math.round(a.inr) - aiItems.reduce((s, i) => s + i.quote, 0);
+    const last = aiItems[aiItems.length - 1];
+    last.quote += drift;
+    last.cost += drift;
+  }
   const aiCost = aiItems.reduce((s, i) => s + i.quote, 0);
   let aiTotal = aiCost;
   if (has('ai')) {
@@ -5702,7 +5724,7 @@ function clientSplit(p, t) {
   }] : [];
   const room = target - Math.round(t.baseCost);
   const audioQuote = has('audio') ? Math.round(ov.audio)
-    : Math.round(t.audio + (room > 0 ? Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, room) : 0));
+    : Math.round(t.audio) + (room > 0 ? Math.floor(Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, room - 1)) : 0);
 
   // Extra items and extra team roles, exactly as typed
   const extras = (p.quoteExtras || []).filter(x => x.amount > 0).map(x => ({
@@ -5757,14 +5779,21 @@ function clientSplit(p, t) {
     }
   }
   // Audio parts, scaled to the audio amount on the quote
-  const audioParts = [['Music', t.music], ['Sound effects', t.sfx], ['Voice-over artists', t.vo]].filter(x => x[1] > 0);
+  const modeDetail = mode => mode === 'perMinute' ? `${t.totalMins} min` : mode === 'perEpisode' ? (t.isSeries ? splitPlural(t.epCount, 'episode', 'episodes') : 'Full film') : 'Overall';
+  const audioParts = [
+    ['Background score', t.music, modeDetail(p.musicMode)],
+    ['Songs', t.songs, p.songMode === 'fixed' ? (p.songCount > 0 ? splitPlural(p.songCount, 'song', 'songs') : 'Overall') : splitPlural(p.songCount, 'song', 'songs')],
+    ['Sound design', t.sfx, modeDetail(p.sfxMode)],
+    ['Mix and mastering', t.mix, modeDetail(p.mixMode)],
+    ['Voice-over artists', t.vo, modeDetail(p.voMode)]
+  ].filter(x => x[1] > 0);
   let audioItems = [];
-  if (audioParts.length > 1 && t.audio > 0) {
+  if (audioParts.length && t.audio > 0) {
     let acc = 0;
-    audioItems = audioParts.map(([label, cost], idx) => {
+    audioItems = audioParts.map(([label, cost, detail], idx) => {
       const quote = idx === audioParts.length - 1 ? audioQuote - acc : Math.round((cost / t.audio) * audioQuote);
       acc += quote;
-      return { label, detail: '', cost, quote };
+      return { label, detail, short: detail, cost, quote };
     });
   }
 
@@ -5824,14 +5853,17 @@ function compute(p) {
   const teamMo = teamCost / dl;
 
   // Studio overhead
-  let spaceRent = 0, pcRent = 0, extra = 0;
+  // PC rent is charged only for the months each person is on the project
+  const personMonths = active.reduce((s, m) => s + m.count * memberMonths(p, m), 0);
+  let spaceRent = 0, pcRent = 0, extra = 0, pcRentTotal = 0;
   if (p.toggleOverhead) {
     spaceRent = p.toggleRentSpace ? p.overheadSpaceRent : 0;
-    pcRent = p.toggleRentPc ? p.overheadPcRent * headcount : 0;
+    pcRentTotal = p.toggleRentPc ? p.overheadPcRent * personMonths : 0;
+    pcRent = pcRentTotal / dl; // average per month
     extra = p.toggleRentExtra ? p.overheadExtra : 0;
   }
-  const overheadMo = spaceRent + pcRent + extra;
-  const overheadTotal = overheadMo * dl;
+  const overheadTotal = (spaceRent + extra) * dl + pcRentTotal;
+  const overheadMo = overheadTotal / dl;
   const burnMo = teamMo + overheadMo;
   const productionRun = teamCost + overheadTotal;
 
@@ -5839,7 +5871,9 @@ function compute(p) {
   const music = audioLine(p.toggleAudio && p.toggleMusic, p.musicMode, p.musicFixedAmt, p.musicPerMinRate, p.musicPerEpRate, totalMins, epCount);
   const sfx = audioLine(p.toggleAudio && p.toggleSfx, p.sfxMode, p.sfxFixedAmt, p.sfxPerMinRate, p.sfxPerEpRate, totalMins, epCount);
   const vo = audioLine(p.toggleAudio && p.toggleVo, p.voMode, p.voFixedAmt, p.voPerMinRate, p.voPerEpRate, totalMins, epCount);
-  const audio = music + sfx + vo;
+  const songs = p.toggleAudio && p.toggleSongs ? (p.songMode === 'fixed' ? p.songFixedAmt : p.songCount * p.songRate) : 0;
+  const mix = audioLine(p.toggleAudio && p.toggleMix, p.mixMode, p.mixFixedAmt, p.mixPerMinRate, p.mixPerEpRate, totalMins, epCount);
+  const audio = music + songs + sfx + mix + vo;
 
   // IP
   const ip = p.toggleIpCharges ? p.ipCharges : 0;
@@ -5881,13 +5915,14 @@ function compute(p) {
 
   // AI VO (ElevenLabs): enough months on the chosen plan to cover all takes
   const voPlan = ELEVEN_PLANS[p.aiVoPlan] || ELEVEN_PLANS.pro;
-  const aiVo = { on: false, plan: voPlan, mins: 0, takes: 0, credits: 0, months: 0, usd: 0, inr: 0 };
+  const aiVo = { on: false, plan: voPlan, mins: 0, takes: 0, credits: 0, needMonths: 0, months: 0, usd: 0, inr: 0 };
   if (p.toggleAiVo) {
     aiVo.on = true;
     aiVo.mins = p.aiVoManual ? p.aiVoMins : totalMins;
     aiVo.takes = Math.max(1, Math.floor(p.aiVoTakes) || 1);
     aiVo.credits = Math.round(aiVo.mins * ELEVEN_CREDITS_PER_MIN * aiVo.takes);
-    aiVo.months = aiVo.credits > 0 ? Math.max(1, Math.ceil(aiVo.credits / voPlan.credits)) : 0;
+    aiVo.needMonths = aiVo.credits > 0 ? Math.max(1, Math.ceil(aiVo.credits / voPlan.credits)) : 0;
+    aiVo.months = Math.max(aiVo.needMonths, p.aiVoMonths || 0);
     aiVo.usd = aiVo.months * voPlan.usd;
     aiVo.inr = Math.round(aiVo.usd * rate);
   }
@@ -5915,8 +5950,8 @@ function compute(p) {
     wd, dl, isSeries, totalMins, totalSecs, epCount, totalDays: dl * wd,
     headcount, animCount, monthBurn,
     teamCost, flatTeamCost, teamMo,
-    spaceRent, pcRent, extra, overheadMo, overheadTotal, burnMo, productionRun,
-    music, sfx, vo, audio, ip, ai, aiVo,
+    spaceRent, pcRent, pcRentTotal, personMonths, extra, overheadMo, overheadTotal, burnMo, productionRun,
+    music, songs, sfx, mix, vo, audio, ip, ai, aiVo,
     baseCost, profitPct, sell, profit, commPct, commission, net: sell - commission,
     costPerEp: perEp(baseCost), sellPerEp: perEp(sell),
     costPerMin: perMin(baseCost), sellPerMin: perMin(sell),
@@ -5936,7 +5971,7 @@ let draftTimer = null;
 const splitOpen = { team: false, ai: false, audio: false, aivo: false };
 
 const INT_KEYS = new Set([
-  'episodes', 'aiDraftIterations', 'aiVoTakes', 'aiSubClaudeCount', 'aiSubClaudeMonths',
+  'episodes', 'aiDraftIterations', 'aiVoTakes', 'aiVoMonths', 'songCount', 'aiSubClaudeCount', 'aiSubClaudeMonths',
   'aiSubChatGptCount', 'aiSubChatGptMonths'
 ]);
 
@@ -6110,8 +6145,21 @@ function shellHtml() {
   const audio = `
     <div class="pp-row"><span class="pp-row-title">Include audio in the cost</span>${sw('toggleAudio', 'Include audio in the cost')}</div>
     <div class="pp-two" data-dim="toggleAudio">
-      ${audioBlock('Music', 'music', 'toggleMusic')}
-      ${audioBlock('Sound effects', 'sfx', 'toggleSfx')}
+      ${audioBlock('Background score', 'music', 'toggleMusic')}
+      <div class="pp-block">
+        <div class="pp-row"><span class="pp-row-title">Songs</span>${sw('toggleSongs', 'Include songs')}</div>
+        <div class="pp-stack" data-dim="toggleSongs">
+          ${seg('songMode', [['perSong', 'Per song'], ['fixed', 'Overall']])}
+          <div class="pp-fields" data-show="songMode:perSong">
+            ${num('songCount', 'Songs', 'min="0" step="1"')}
+            ${num('songRate', 'Cost per song (₹)')}
+          </div>
+          <div data-show="songMode:fixed">${num('songFixedAmt', 'Overall cost for all songs (₹)')}</div>
+          <div class="pp-hint" data-out="songHint"></div>
+        </div>
+      </div>
+      ${audioBlock('Sound design', 'sfx', 'toggleSfx')}
+      ${audioBlock('Mix and mastering', 'mix', 'toggleMix')}
       ${audioBlock('Voice-over artists', 'vo', 'toggleVo')}
     </div>`;
 
@@ -6172,7 +6220,9 @@ function shellHtml() {
           <div class="pp-fields">
             ${num('aiVoMins', 'Finished VO (minutes)')}
             ${num('aiVoTakes', 'Takes per line, incl. revisions', 'min="1" step="1"')}
+            ${num('aiVoMonths', 'Months on the plan', 'min="1" step="1"')}
           </div>
+          <button type="button" class="pp-link" data-act="aivo-deadline" data-out="aiVoDeadline"></button>
           <button type="button" class="pp-link" data-act="aivo-suggest" data-out="aiVoSuggest"></button>
           <div class="pp-hint" data-out="aiVoHint"></div>
         </div>
@@ -6408,12 +6458,12 @@ function renderTimeline(t) {
   box.innerHTML = `<div class="pp-gantt-grid" style="grid-template-columns: 120px repeat(${dl}, minmax(36px, 1fr)); min-width: ${120 + dl * 39}px;">${cells.join('')}</div>`;
 }
 
-function syncInputs() {
+function syncInputs(t) {
   const focused = document.activeElement;
   root.querySelectorAll('[data-num]').forEach(el => {
     if (el === focused) return;
     const k = el.dataset.num;
-    el.value = k === 'prodMonths' ? prodMonths() : state[k];
+    el.value = k === 'prodMonths' ? prodMonths() : k === 'aiVoMonths' ? (t && t.aiVo.on ? t.aiVo.months : '') : state[k];
   });
   root.querySelectorAll('[data-toggle]').forEach(el => { el.checked = !!state[el.dataset.toggle]; });
   root.querySelectorAll('[data-sel]').forEach(el => { el.value = state[el.dataset.sel]; });
@@ -6451,7 +6501,7 @@ function render() {
   if (!s.aiManualOverride) s.aiFootageMins = t.totalMins;
 
   syncControls();
-  syncInputs();
+  syncInputs(t);
 
   // Section summaries
   out('sum-project', t.isSeries ? `${s.episodes} × ${s.epMins} min · ${t.totalMins} min` : `Movie · ${t.totalMins} min`);
@@ -6479,17 +6529,24 @@ function render() {
   out('musicHint', audioHint(s.musicMode, t.music, t));
   out('sfxHint', audioHint(s.sfxMode, t.sfx, t));
   out('voHint', audioHint(s.voMode, t.vo, t));
+  out('mixHint', audioHint(s.mixMode, t.mix, t));
+  out('songHint', s.songMode === 'fixed'
+    ? (s.songCount > 0 ? `Works out to ${inrFull(t.songs / Math.max(1, s.songCount))} per song for ${plural(s.songCount, 'song')}.` : '')
+    : `${plural(s.songCount, 'song')} · ${inr(t.songs)} in total.`);
   if (!s.aiVoManual) s.aiVoMins = t.totalMins;
+  out('aiVoDeadline', t.aiVo.on && t.aiVo.months !== t.dl && t.dl >= t.aiVo.needMonths ? `Keep the plan for the whole ${t.dl}-month schedule` : '');
+  outs.get('aiVoDeadline').forEach(el => { el.hidden = !(t.aiVo.on && t.aiVo.months !== t.dl && t.dl >= t.aiVo.needMonths); });
   out('aiVoSuggest', s.aiVoManual ? `Use the content length instead (${t.totalMins} min)` : '');
   outs.get('aiVoSuggest').forEach(el => { el.hidden = !s.aiVoManual; });
   const v = t.aiVo;
   out('aiVoHint', v.on
-    ? `${v.mins} min × ${v.takes} takes ≈ ${(v.credits / 1000).toLocaleString('en-IN')}k credits → ${v.plan.label} plan for ${plural(v.months, 'month')} = ${usd(v.usd)} (${inr(v.inr)}).`
+    ? `${v.mins} min × ${v.takes} takes ≈ ${(v.credits / 1000).toLocaleString('en-IN')}k credits, which needs at least ${plural(v.needMonths, 'month')} on ${v.plan.label}. ` +
+      `${v.plan.label} for ${plural(v.months, 'month')} = ${usd(v.usd)} (${inrFull(v.inr)}).`
     : '');
 
   // Overhead
   out('overheadHint', s.toggleOverhead
-    ? `${inr(t.overheadMo)} a month (PC rent covers ${t.headcount === 1 ? '1 person' : t.headcount + ' people'}) · ${inr(t.overheadTotal)} over ${plural(t.dl, 'month')}.`
+    ? `${inr(t.overheadTotal)} over ${plural(t.dl, 'month')} (about ${inr(t.overheadMo)} a month). PC rent covers ${t.personMonths} person-months, only the months each person works.`
     : '');
 
   // AI
@@ -6504,7 +6561,7 @@ function render() {
   out('aiHint', `Video ${usd(a.videoUsd)} + subscriptions ${usd(a.subsUsd)} = ${usd(a.usd)}, which is ${inr(a.inr)}. Credits are priced at $${AI_PACKAGE.usd} for ${AI_PACKAGE.credits.toLocaleString('en-IN')}.`);
 
   // Summary
-  out('sell', inr(t.sell));
+  out('sell', inrFull(t.sell));
   out('sellSub', `${inrUnit(t.sellPerMin)} per minute${t.isSeries && s.episodes > 0 ? ' · ' + inr(t.sellPerEp) + ' per episode' : ''}`);
   out('cost', inr(t.baseCost));
   out('profit', inr(t.profit));
@@ -6557,7 +6614,9 @@ function render() {
     `<tr class="profit"><td>Profit (${pct(Math.round(sp.showPct))})</td><td>${inr(sp.realProfit)}</td><td>${inr(sp.profit)}</td></tr>` +
     `<tr class="total"><td>Total</td><td>${inr(t.sell)}</td><td>${inr(sp.total)}</td></tr>`, true);
   const editsNote = sp.edits ? ' Amounts you edited are in purple.' : '';
-  out('splitNote', t.baseCost <= 0 && !sp.edits ? '' : !sp.exact
+  out('splitNote', t.baseCost <= 0 && !sp.edits ? '' : !sp.exact && sp.realPct < sp.askPct
+    ? `<span class="warn">Your real profit is only ${pct(sp.realPct)} on costs, so the quote can't show ${pct(sp.askPct)}.</span> Founder salaries, AI and IP stay at real cost, so the most it can show is ${pct(Math.round(sp.showPct * 10) / 10)}. Raise your profit margin or lower the profit shown.`
+    : !sp.exact
     ? `<span class="warn">Your edits don't leave room for exactly ${pct(sp.askPct)} profit, so the quote shows ${pct(Math.round(sp.showPct * 10) / 10)}.</span> ` +
       (sp.overheadAuto ? 'Lower some of the edited amounts to bring it back.' : 'Clear the Studio overhead amount so it can balance the quote.')
     : sp.belowCost
@@ -6765,6 +6824,9 @@ function onNumber(el, committed) {
       state.aiVoManual = true;
       state.aiVoMins = v >= 0 ? v : 0;
       break;
+    case 'aiVoMonths':
+      state.aiVoMonths = v >= 0 ? Math.floor(v) : 0;
+      break;
     case 'aiVoTakes':
       state.aiVoTakes = v >= 1 ? Math.floor(v) : 1;
       break;
@@ -6929,6 +6991,10 @@ function onClick(e) {
     case 'full-phases':
       state.team.forEach(m => { m.startMonth = 1; m.durationMonths = state.deadlineMonths; });
       rebuild();
+      break;
+    case 'aivo-deadline':
+      state.aiVoMonths = state.deadlineMonths;
+      render();
       break;
     case 'aivo-suggest':
       state.aiVoManual = false;
@@ -7100,8 +7166,8 @@ function internalSheet(t) {
 
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;${box}margin-bottom:16px;">
         ${part('Team total', inr(t.teamCost))}
-        ${part('Overhead total', inr(t.overheadTotal), s.toggleOverhead ? `Space ${inr(t.spaceRent)} · PC ${inr(t.pcRent)} · Other ${inr(t.extra)}` : 'Overhead is off')}
-        ${part('Audio (music + SFX)', inr(t.audio))}
+        ${part('Overhead total', inr(t.overheadTotal), s.toggleOverhead ? `Per month: space ${inr(t.spaceRent)} · PCs ${inr(t.pcRent)} avg · other ${inr(t.extra)}` : 'Overhead is off')}
+        ${part('Audio', inr(t.audio))}
         ${part('IP and AI', inr(t.ip + t.ai.inr + t.aiVo.inr), `IP ${inr(t.ip)} · AI ${inr(t.ai.inr)}${t.aiVo.on ? ' · VO ' + inr(t.aiVo.inr) : ''}`, '#38bdf8')}
       </div>
 
@@ -7130,7 +7196,7 @@ const PROPOSAL_LINE = {
   aivo:        { title: 'AI VO',                     sub: 'AI voice generation, at cost' },
   team:        { title: 'Production team',          sub: 'Pre-production to final render' },
   overhead:    { title: 'Studio overhead',           sub: 'Space, workstations and running costs' },
-  audio:       { title: 'Music and sound design',    sub: 'Original score, SFX and mix' },
+  audio:       { title: 'Music and sound',           sub: 'Score, songs, sound design and mix' },
   ip:          { title: 'IP and rights',             sub: 'Story, characters and world rights' },
   ai:          { title: 'AI generation and tools',   sub: 'Video passes and AI subscriptions, at cost' }
 };
