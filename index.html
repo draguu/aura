@@ -3146,6 +3146,14 @@ textarea.form-control {
   }
 }
 
+.pp-exact {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
 </style>
 </head>
 <body>
@@ -5663,6 +5671,72 @@ function countQuoteEdits(p) {
     (p.quoteRoles || []).length + (p.quoteExtras || []).length;
 }
 
+// Round a client-facing rate down to a figure that looks natural
+function niceRate(v) {
+  const step = v >= 10000 ? 500 : v >= 1000 ? 100 : 10;
+  return Math.max(step, Math.floor(v / step) * step);
+}
+
+/**
+ * Audio on the quote, part by part. Parts priced per minute, per episode or
+ * per song keep a round rate so quantity × rate adds up exactly; the total
+ * may land a few rupees under the target, and overhead takes the difference.
+ * An audio amount typed in "Edit quote" is split in proportion instead, so
+ * it is kept exactly.
+ */
+function audioBreakdown(p, t, target, edited) {
+  const unitRate = (mode, perMin, perEp) => mode === 'perMinute' ? { qty: t.totalMins, rate: perMin, unit: 'min' }
+    : mode === 'perEpisode' && t.isSeries ? { qty: t.epCount, rate: perEp, unit: 'ep' }
+    : null;
+  const parts = [
+    { label: 'Background score', cost: t.music, q: unitRate(p.musicMode, p.musicPerMinRate, p.musicPerEpRate), mode: p.musicMode },
+    { label: 'Songs', cost: t.songs, q: p.songMode === 'perSong' ? { qty: p.songCount, rate: p.songRate, unit: 'song' } : null, songs: p.songCount, mode: p.songMode },
+    { label: 'Sound design', cost: t.sfx, q: unitRate(p.sfxMode, p.sfxPerMinRate, p.sfxPerEpRate), mode: p.sfxMode },
+    { label: 'Mix and mastering', cost: t.mix, q: unitRate(p.mixMode, p.mixPerMinRate, p.mixPerEpRate), mode: p.mixMode },
+    { label: 'Voice-over artists', cost: t.vo, q: unitRate(p.voMode, p.voPerMinRate, p.voPerEpRate), mode: p.voMode }
+  ].filter(x => x.cost > 0);
+  if (!parts.length || t.audio <= 0) return { items: [], total: target };
+
+  const factor = target / t.audio;
+  const describe = (x, rate) => {
+    if (x.q && x.q.qty > 0) {
+      if (x.q.unit === 'min') return `${x.q.qty} min × ${inrFull(rate)}/min`;
+      if (x.q.unit === 'ep') return `${splitPlural(x.q.qty, 'episode', 'episodes')} × ${inrFull(rate)}`;
+      return `${splitPlural(x.q.qty, 'song', 'songs')} × ${inrFull(rate)}`;
+    }
+    if (x.label === 'Songs' && x.songs > 0) return `${splitPlural(x.songs, 'song', 'songs')}, overall`;
+    if (x.mode === 'perEpisode' && !t.isSeries) return 'Full film';
+    return 'Overall';
+  };
+
+  let items;
+  if (edited) {
+    let acc = 0;
+    items = parts.map((x, idx) => {
+      const quote = idx === parts.length - 1 ? target - acc : Math.round((x.cost / t.audio) * target);
+      acc += quote;
+      const rate = x.q && x.q.qty > 0 && quote % x.q.qty === 0 ? quote / x.q.qty : 0;
+      const detail = rate ? describe(x, rate) : x.q && x.q.qty > 0 ? `${x.q.unit === 'min' ? x.q.qty + ' min' : x.q.unit === 'ep' ? splitPlural(x.q.qty, 'episode', 'episodes') : splitPlural(x.q.qty, 'song', 'songs')}` : describe(x, 0);
+      return { label: x.label, detail, short: detail, cost: x.cost, quote };
+    });
+    return { items, total: target };
+  }
+
+  items = parts.map(x => {
+    let quote, rate = 0;
+    if (x.q && x.q.qty > 0) {
+      rate = factor === 1 ? x.q.rate : niceRate(x.q.rate * factor);
+      if (rate < x.q.rate && factor >= 1) rate = x.q.rate;
+      quote = rate * x.q.qty;
+    } else {
+      quote = factor === 1 ? Math.round(x.cost) : Math.floor(x.cost * factor);
+    }
+    const detail = describe(x, rate);
+    return { label: x.label, detail, short: detail, cost: x.cost, quote };
+  });
+  return { items, total: items.reduce((s, i) => s + i.quote, 0) };
+}
+
 function clientSplit(p, t) {
   const askPct = Math.max(0, p.clientProfitPct || 0);
   const total = Math.round(t.sell);
@@ -5724,9 +5798,10 @@ function clientSplit(p, t) {
     cost: v.inr, quote: aiVoQuote
   }] : [];
   const room = target - Math.round(t.baseCost);
-  const audioQuote = has('audio') ? Math.round(ov.audio)
+  const audioTarget = has('audio') ? Math.round(ov.audio)
     : p.clientAudioAtCost ? Math.round(t.audio)
     : Math.round(t.audio) + (room > 0 ? Math.floor(Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, room - 1)) : 0);
+  const { items: audioItems, total: audioQuote } = audioBreakdown(p, t, audioTarget, has('audio'));
 
   // Extra items and extra team roles, exactly as typed
   const extras = (p.quoteExtras || []).filter(x => x.amount > 0).map(x => ({
@@ -5780,25 +5855,6 @@ function clientSplit(p, t) {
       left -= salary * dl;
     }
   }
-  // Audio parts, scaled to the audio amount on the quote
-  const modeDetail = mode => mode === 'perMinute' ? `${t.totalMins} min` : mode === 'perEpisode' ? (t.isSeries ? splitPlural(t.epCount, 'episode', 'episodes') : 'Full film') : 'Overall';
-  const audioParts = [
-    ['Background score', t.music, modeDetail(p.musicMode)],
-    ['Songs', t.songs, p.songMode === 'fixed' ? (p.songCount > 0 ? splitPlural(p.songCount, 'song', 'songs') : 'Overall') : splitPlural(p.songCount, 'song', 'songs')],
-    ['Sound design', t.sfx, modeDetail(p.sfxMode)],
-    ['Mix and mastering', t.mix, modeDetail(p.mixMode)],
-    ['Voice-over artists', t.vo, modeDetail(p.voMode)]
-  ].filter(x => x[1] > 0);
-  let audioItems = [];
-  if (audioParts.length && t.audio > 0) {
-    let acc = 0;
-    audioItems = audioParts.map(([label, cost, detail], idx) => {
-      const quote = idx === audioParts.length - 1 ? audioQuote - acc : Math.round((cost / t.audio) * audioQuote);
-      acc += quote;
-      return { label, detail, short: detail, cost, quote };
-    });
-  }
-
   // Overhead takes the rest, unless the user fixed it
   const allTeam = teamItems.concat(roles, added);
   const teamQuote = allTeam.reduce((s, i) => s + i.quote, 0);
@@ -6247,6 +6303,7 @@ function shellHtml() {
           <button type="button" class="btn btn-primary btn-sm" data-act="save">Save plan</button>
         </div>
         <div class="pp-big" data-out="sell"></div>
+        <div class="pp-exact" data-out="sellExact"></div>
         <div class="pp-hint" data-out="sellSub"></div>
       </div>
       <div class="pp-kpis">
@@ -6565,7 +6622,8 @@ function render() {
   out('aiHint', `Video ${usd(a.videoUsd)} + subscriptions ${usd(a.subsUsd)} = ${usd(a.usd)}, which is ${inr(a.inr)}. Credits are priced at $${AI_PACKAGE.usd} for ${AI_PACKAGE.credits.toLocaleString('en-IN')}.`);
 
   // Summary
-  out('sell', inrFull(t.sell));
+  out('sell', inr(t.sell));
+  out('sellExact', inrFull(t.sell));
   out('sellSub', `${inrUnit(t.sellPerMin)} per minute${t.isSeries && s.episodes > 0 ? ' · ' + inr(t.sellPerEp) + ' per episode' : ''}`);
   out('cost', inr(t.baseCost));
   out('profit', inr(t.profit));
@@ -7171,7 +7229,7 @@ function internalSheet(t) {
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;${box}margin-bottom:16px;">
         ${part('Team total', inr(t.teamCost))}
         ${part('Overhead total', inr(t.overheadTotal), s.toggleOverhead ? `Per month: space ${inr(t.spaceRent)} · PCs ${inr(t.pcRent)} avg · other ${inr(t.extra)}` : 'Overhead is off')}
-        ${part('Audio', inr(t.audio))}
+        ${part('Audio', inr(t.audio), [['Score', t.music], ['Songs', t.songs], ['SFX', t.sfx], ['Mix', t.mix], ['VO', t.vo]].filter(x => x[1] > 0).map(x => x[0] + ' ' + inr(x[1])).join(' · '))}
         ${part('IP and AI', inr(t.ip + t.ai.inr + t.aiVo.inr), `IP ${inr(t.ip)} · AI ${inr(t.ai.inr)}${t.aiVo.on ? ' · VO ' + inr(t.aiVo.inr) : ''}`, '#38bdf8')}
       </div>
 
