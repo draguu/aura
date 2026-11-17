@@ -1917,7 +1917,7 @@ textarea.form-control {
   transition: transform var(--transition-fast);
 }
 
-.pp-sec[open] .pp-chev {
+.pp-sec[open] > summary .pp-chev {
   transform: rotate(180deg);
 }
 
@@ -2200,10 +2200,6 @@ textarea.form-control {
 .pp-member {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
   background: var(--bg-primary);
 }
 
@@ -2211,16 +2207,71 @@ textarea.form-control {
   background-color: var(--bg-secondary);
 }
 
-.pp-member.off .pp-member-fields,
-.pp-member.off .pp-member-foot,
-.pp-member.off .pp-member-role {
+.pp-member.off .pp-member-head,
+.pp-member.off .pp-member-total,
+.pp-member.off .pp-member-body {
   opacity: 0.45;
 }
 
 .pp-member-top {
+  list-style: none;
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-md);
+}
+
+.pp-member-top::-webkit-details-marker {
+  display: none;
+}
+
+.pp-member[open] > .pp-member-top .pp-chev {
+  transform: rotate(180deg);
+}
+
+.pp-member-head {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.pp-member-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pp-member-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pp-member-total {
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.pp-member-body {
+  padding: 2px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pp-member-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .pp-member-role {
@@ -5257,6 +5308,16 @@ const AI_TIERS = {
 // Older saved plans stored only a resolution
 const AI_TIER_ALIAS = { "480": "wan3_480", "720": "wan3_720", "1080": "wan3_prime_1080" };
 
+// ElevenLabs plans (monthly billing, USD), from elevenlabs.io/pricing, Nov 2026.
+// About 1,000 credits make one minute of speech with the standard models.
+const ELEVEN_PLANS = {
+  creator:  { label: 'Creator',  usd: 22,  credits: 121000 },
+  pro:      { label: 'Pro',      usd: 99,  credits: 600000 },
+  scale:    { label: 'Scale',    usd: 299, credits: 1800000 },
+  business: { label: 'Business', usd: 990, credits: 6000000 }
+};
+const ELEVEN_CREDITS_PER_MIN = 1000;
+
 const creditsToUsd = credits => (credits * AI_PACKAGE.usd) / AI_PACKAGE.credits;
 
 // ── FORMATTING ───────────────────────────────────────────────────────────────
@@ -5341,6 +5402,11 @@ function defaults() {
     sfxFixedAmt: 30000,
     sfxPerMinRate: 1000,
     sfxPerEpRate: 1500,
+    toggleVo: false,
+    voMode: "perEpisode",
+    voFixedAmt: 50000,
+    voPerMinRate: 2000,
+    voPerEpRate: 5000,
 
     toggleOverhead: false,
     toggleRentSpace: true,
@@ -5365,6 +5431,11 @@ function defaults() {
     aiDraftIterations: 1,
     aiFinalIterations: 1,
     aiExchangeRate: 94,
+    toggleAiVo: false,
+    aiVoPlan: "pro",
+    aiVoMins: 140,
+    aiVoManual: false,
+    aiVoTakes: 4,
     toggleAiSubs: true,
     toggleSubClaude: true,
     aiSubClaudeCount: 1,
@@ -5424,6 +5495,9 @@ function normalize(src) {
   p.contentType = p.contentType === 'movie' ? 'movie' : 'series';
   if (!MODES.includes(p.musicMode)) p.musicMode = 'fixed';
   if (!MODES.includes(p.sfxMode)) p.sfxMode = 'fixed';
+  if (!MODES.includes(p.voMode)) p.voMode = 'perEpisode';
+  if (!ELEVEN_PLANS[p.aiVoPlan]) p.aiVoPlan = 'pro';
+  p.aiVoTakes = Math.max(1, Math.floor(p.aiVoTakes) || 1);
   if (p.proposalMode !== 'detailed') p.proposalMode = 'normal';
 
   // Quote edits
@@ -5560,12 +5634,12 @@ const isFounder = role => /founder/i.test(role || '');
 // Round down to a figure that looks like a real salary
 const roundSalary = v => (v >= 100000 ? Math.floor(v / 5000) * 5000 : Math.floor(v / 1000) * 1000);
 const COORDINATOR_SALARY = 40000;
-const QC_SALARY = { min: 25000, base: 30000, max: 45000 };
 const QUOTE_LINES = [
   { key: 'overhead', label: 'Studio overhead' },
   { key: 'audio', label: 'Audio' },
   { key: 'ip', label: 'IP charges' },
-  { key: 'ai', label: 'AI' }
+  { key: 'ai', label: 'AI' },
+  { key: 'aivo', label: 'AI VO' }
 ];
 
 function countQuoteEdits(p) {
@@ -5619,6 +5693,13 @@ function clientSplit(p, t) {
   }
 
   const ipQuote = has('ip') ? Math.round(ov.ip) : Math.round(t.ip);
+  const v = t.aiVo;
+  const aiVoQuote = has('aivo') ? Math.round(ov.aivo) : v.inr;
+  const aiVoItems = v.on && v.inr > 0 ? [{
+    label: `ElevenLabs ${v.plan.label} plan`,
+    detail: `${v.mins} min × ${splitPlural(v.takes, 'take', 'takes')} · ${splitPlural(v.months, 'month', 'months')}`,
+    cost: v.inr, quote: aiVoQuote
+  }] : [];
   const room = target - Math.round(t.baseCost);
   const audioQuote = has('audio') ? Math.round(ov.audio)
     : Math.round(t.audio + (room > 0 ? Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, room) : 0));
@@ -5643,7 +5724,7 @@ function clientSplit(p, t) {
   const overheadAuto = !has('overhead');
   const overheadFixed = overheadAuto ? 0 : Math.round(ov.overhead);
 
-  const forFlex = target - aiTotal - ipQuote - audioQuote - extrasTotal - rolesTotal - fixedTeam - overheadFixed;
+  const forFlex = target - aiTotal - aiVoQuote - ipQuote - audioQuote - extrasTotal - rolesTotal - fixedTeam - overheadFixed;
   const scalableTeam = active.filter(m => !fixed(m)).reduce((s, m) => s + m.salary * m.count * months(m), 0);
   const scalable = scalableTeam + (overheadAuto ? t.overheadTotal : 0);
   const extra = forFlex - scalable;
@@ -5675,31 +5756,32 @@ function clientSplit(p, t) {
       left -= salary * dl;
     }
   }
-  if (left > 0 && !allRoles.some(r => /\bqc\b|quality/i.test(r))) {
-    const qcMonths = Math.max(1, dl - (p.togglePreProd ? productionStart(p) - 1 : 0));
-    const artists = active.filter(m => !isFounder(m.role)).reduce((s, m) => s + m.count, 0);
-    const maxQc = Math.max(2, Math.ceil(artists / 2));
-    const count = Math.max(1, Math.min(maxQc, Math.ceil(left / (QC_SALARY.max * qcMonths))));
-    const salary = Math.min(roundSalary(left / (count * qcMonths)), QC_SALARY.max);
-    if (salary >= QC_SALARY.min) {
-      added.push(member('QC Team', count, qcMonths, salary, 0));
-      left -= salary * count * qcMonths;
-    }
+  // Audio parts, scaled to the audio amount on the quote
+  const audioParts = [['Music', t.music], ['Sound effects', t.sfx], ['Voice-over artists', t.vo]].filter(x => x[1] > 0);
+  let audioItems = [];
+  if (audioParts.length > 1 && t.audio > 0) {
+    let acc = 0;
+    audioItems = audioParts.map(([label, cost], idx) => {
+      const quote = idx === audioParts.length - 1 ? audioQuote - acc : Math.round((cost / t.audio) * audioQuote);
+      acc += quote;
+      return { label, detail: '', cost, quote };
+    });
   }
 
   // Overhead takes the rest, unless the user fixed it
   const allTeam = teamItems.concat(roles, added);
   const teamQuote = allTeam.reduce((s, i) => s + i.quote, 0);
   const overheadQuote = overheadAuto
-    ? Math.max(0, target - aiTotal - ipQuote - audioQuote - extrasTotal - teamQuote)
+    ? Math.max(0, target - aiTotal - aiVoQuote - ipQuote - audioQuote - extrasTotal - teamQuote)
     : overheadFixed;
 
   const lines = [
     { key: 'team', label: 'Team', cost: t.teamCost, quote: teamQuote, items: allTeam },
     { key: 'overhead', label: 'Studio overhead', cost: t.overheadTotal, quote: overheadQuote, edited: !overheadAuto },
-    { key: 'audio', label: 'Audio', cost: t.audio, quote: audioQuote, edited: has('audio') },
+    { key: 'audio', label: 'Audio', cost: t.audio, quote: audioQuote, items: audioItems, edited: has('audio') },
     { key: 'ip', label: 'IP charges', cost: t.ip, quote: ipQuote, edited: has('ip') },
-    { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems, edited: has('ai') }
+    { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems, edited: has('ai') },
+    { key: 'aivo', label: 'AI VO', cost: v.inr, quote: aiVoQuote, items: aiVoItems, edited: has('aivo') }
   ].concat(extras).filter(l => l.cost > 0 || l.quote > 0);
 
   const subtotal = lines.reduce((s, l) => s + l.quote, 0);
@@ -5756,7 +5838,8 @@ function compute(p) {
   // Audio
   const music = audioLine(p.toggleAudio && p.toggleMusic, p.musicMode, p.musicFixedAmt, p.musicPerMinRate, p.musicPerEpRate, totalMins, epCount);
   const sfx = audioLine(p.toggleAudio && p.toggleSfx, p.sfxMode, p.sfxFixedAmt, p.sfxPerMinRate, p.sfxPerEpRate, totalMins, epCount);
-  const audio = music + sfx;
+  const vo = audioLine(p.toggleAudio && p.toggleVo, p.voMode, p.voFixedAmt, p.voPerMinRate, p.voPerEpRate, totalMins, epCount);
+  const audio = music + sfx + vo;
 
   // IP
   const ip = p.toggleIpCharges ? p.ipCharges : 0;
@@ -5796,11 +5879,24 @@ function compute(p) {
     ai.inr = Math.round(ai.usd * rate);
   }
 
+  // AI VO (ElevenLabs): enough months on the chosen plan to cover all takes
+  const voPlan = ELEVEN_PLANS[p.aiVoPlan] || ELEVEN_PLANS.pro;
+  const aiVo = { on: false, plan: voPlan, mins: 0, takes: 0, credits: 0, months: 0, usd: 0, inr: 0 };
+  if (p.toggleAiVo) {
+    aiVo.on = true;
+    aiVo.mins = p.aiVoManual ? p.aiVoMins : totalMins;
+    aiVo.takes = Math.max(1, Math.floor(p.aiVoTakes) || 1);
+    aiVo.credits = Math.round(aiVo.mins * ELEVEN_CREDITS_PER_MIN * aiVo.takes);
+    aiVo.months = aiVo.credits > 0 ? Math.max(1, Math.ceil(aiVo.credits / voPlan.credits)) : 0;
+    aiVo.usd = aiVo.months * voPlan.usd;
+    aiVo.inr = Math.round(aiVo.usd * rate);
+  }
+
   // Cost, price and margins. Profit is marked up on the production run and
   // audio; IP and AI are passed through at cost.
-  const baseCost = productionRun + audio + ip + ai.inr;
+  const baseCost = productionRun + audio + ip + ai.inr + aiVo.inr;
   const profitPct = p.toggleProfit ? p.profitPct : 0;
-  const sell = (productionRun + audio) * (1 + profitPct / 100) + ip + ai.inr;
+  const sell = (productionRun + audio) * (1 + profitPct / 100) + ip + ai.inr + aiVo.inr;
   const profit = sell - baseCost;
   const commPct = p.toggleCommission ? p.commissionPct : 0;
   const commission = sell * (commPct / 100);
@@ -5820,7 +5916,7 @@ function compute(p) {
     headcount, animCount, monthBurn,
     teamCost, flatTeamCost, teamMo,
     spaceRent, pcRent, extra, overheadMo, overheadTotal, burnMo, productionRun,
-    music, sfx, audio, ip, ai,
+    music, sfx, vo, audio, ip, ai, aiVo,
     baseCost, profitPct, sell, profit, commPct, commission, net: sell - commission,
     costPerEp: perEp(baseCost), sellPerEp: perEp(sell),
     costPerMin: perMin(baseCost), sellPerMin: perMin(sell),
@@ -5837,10 +5933,10 @@ let saveStateToLocalStorage = null;
 let root = null;
 let outs = null;
 let draftTimer = null;
-const splitOpen = { team: false, ai: false };
+const splitOpen = { team: false, ai: false, audio: false, aivo: false };
 
 const INT_KEYS = new Set([
-  'episodes', 'aiDraftIterations', 'aiSubClaudeCount', 'aiSubClaudeMonths',
+  'episodes', 'aiDraftIterations', 'aiVoTakes', 'aiSubClaudeCount', 'aiSubClaudeMonths',
   'aiSubChatGptCount', 'aiSubChatGptMonths'
 ]);
 
@@ -5913,10 +6009,10 @@ const section = (id, title, body, open) => `
     <div class="pp-sec-body">${body}</div>
   </details>`;
 
-const audioBlock = (name, k) => `
+const audioBlock = (name, k, toggleKey) => `
   <div class="pp-block">
-    <div class="pp-row"><span class="pp-row-title">${name}</span>${sw('toggle' + (k === 'music' ? 'Music' : 'Sfx'), 'Include ' + name.toLowerCase())}</div>
-    <div class="pp-stack" data-dim="${k === 'music' ? 'toggleMusic' : 'toggleSfx'}">
+    <div class="pp-row"><span class="pp-row-title">${name}</span>${sw(toggleKey, 'Include ' + name.toLowerCase())}</div>
+    <div class="pp-stack" data-dim="${toggleKey}">
       ${seg(k + 'Mode', [['fixed', 'Fixed'], ['perMinute', 'Per minute'], ['perEpisode', 'Per episode']])}
       <div data-show="${k}Mode:fixed">${num(k + 'FixedAmt', 'Budget for the whole project (₹)')}</div>
       <div data-show="${k}Mode:perMinute">${num(k + 'PerMinRate', 'Rate per minute of content (₹)')}</div>
@@ -6014,8 +6110,9 @@ function shellHtml() {
   const audio = `
     <div class="pp-row"><span class="pp-row-title">Include audio in the cost</span>${sw('toggleAudio', 'Include audio in the cost')}</div>
     <div class="pp-two" data-dim="toggleAudio">
-      ${audioBlock('Music', 'music')}
-      ${audioBlock('Sound effects', 'sfx')}
+      ${audioBlock('Music', 'music', 'toggleMusic')}
+      ${audioBlock('Sound effects', 'sfx', 'toggleSfx')}
+      ${audioBlock('Voice-over artists', 'vo', 'toggleVo')}
     </div>`;
 
   const rentField = (toggleKey, numKey, label) => `
@@ -6067,6 +6164,20 @@ function shellHtml() {
         </div>
       </div>
       <div class="pp-sub">
+        <div class="pp-row"><span class="pp-row-title">AI VO (ElevenLabs)</span>${sw('toggleAiVo', 'Include AI VO')}</div>
+        <div class="pp-stack" data-dim="toggleAiVo">
+          <label class="pp-field"><span>Plan</span><select class="form-select" data-sel="aiVoPlan">
+            ${Object.keys(ELEVEN_PLANS).map(k => `<option value="${k}">${ELEVEN_PLANS[k].label} · $${ELEVEN_PLANS[k].usd}/month · ${(ELEVEN_PLANS[k].credits / 1000).toLocaleString('en-IN')}k credits (about ${(ELEVEN_PLANS[k].credits / ELEVEN_CREDITS_PER_MIN).toLocaleString('en-IN')} min)</option>`).join('')}
+          </select></label>
+          <div class="pp-fields">
+            ${num('aiVoMins', 'Finished VO (minutes)')}
+            ${num('aiVoTakes', 'Takes per line, incl. revisions', 'min="1" step="1"')}
+          </div>
+          <button type="button" class="pp-link" data-act="aivo-suggest" data-out="aiVoSuggest"></button>
+          <div class="pp-hint" data-out="aiVoHint"></div>
+        </div>
+      </div>
+      <div class="pp-sub">
         <div class="pp-fields">
           ${num('aiExchangeRate', 'Exchange rate (₹ per USD)', 'min="1" step="any"')}
         </div>
@@ -6097,6 +6208,7 @@ function shellHtml() {
         ${line('Audio', 'lineAudio')}
         ${line('IP charges', 'lineIp')}
         ${line('AI', 'lineAi')}
+        ${line('AI VO', 'lineAiVo')}
         ${line('Production cost', 'lineCost', 'total')}
         <div class="pp-hint" data-out="costSub"></div>
       </div>
@@ -6190,31 +6302,43 @@ function shellHtml() {
     </div>`;
 }
 
+const openMembers = new Set();
+
 function memberHtml(m) {
   return `
-    <div class="pp-member" data-id="${esc(m.id)}">
-      <div class="pp-member-top">
+    <details class="pp-member" data-id="${esc(m.id)}" ${openMembers.has(String(m.id)) ? 'open' : ''}>
+      <summary class="pp-member-top">
         <label class="pp-switch"><input type="checkbox" data-m="enabled" aria-label="Include in the cost"><span></span></label>
-        <input type="text" class="form-control pp-member-role" data-m="role" value="${esc(m.role)}" aria-label="Role title">
-        <button type="button" class="pp-icon-btn" data-m-remove aria-label="Remove ${esc(m.role)}">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-      </div>
-      <div class="pp-member-fields">
-        <div class="pp-field">
-          <span>People</span>
-          <div class="pp-stepper">
-            <button type="button" data-m-step="-1" aria-label="One fewer">−</button>
-            <input type="number" inputmode="numeric" class="form-control" data-m="count" min="1" step="1" aria-label="People">
-            <button type="button" data-m-step="1" aria-label="One more">+</button>
-          </div>
+        <span class="pp-member-head">
+          <span class="pp-member-name" data-mout="name"></span>
+          <span class="pp-member-meta" data-mout="meta"></span>
+        </span>
+        <strong class="pp-member-total" data-mout="total"></strong>
+        ${CHEVRON}
+      </summary>
+      <div class="pp-member-body">
+        <div class="pp-member-row">
+          <input type="text" class="form-control pp-member-role" data-m="role" value="${esc(m.role)}" aria-label="Role title">
+          <button type="button" class="pp-icon-btn" data-m-remove aria-label="Remove ${esc(m.role)}">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
         </div>
-        <label class="pp-field"><span>Salary / month (₹)</span><input type="number" inputmode="decimal" class="form-control" data-m="salary" min="0" step="any"></label>
-        <label class="pp-field pp-phase-only"><span>Starts in month</span><input type="number" inputmode="numeric" class="form-control" data-m="startMonth" min="1" step="1"></label>
-        <label class="pp-field pp-phase-only"><span>For (months)</span><input type="number" inputmode="numeric" class="form-control" data-m="durationMonths" min="1" step="1"></label>
+        <div class="pp-member-fields">
+          <div class="pp-field">
+            <span>People</span>
+            <div class="pp-stepper">
+              <button type="button" data-m-step="-1" aria-label="One fewer">−</button>
+              <input type="number" inputmode="numeric" class="form-control" data-m="count" min="1" step="1" aria-label="People">
+              <button type="button" data-m-step="1" aria-label="One more">+</button>
+            </div>
+          </div>
+          <label class="pp-field"><span>Salary / month (₹)</span><input type="number" inputmode="decimal" class="form-control" data-m="salary" min="0" step="any"></label>
+          <label class="pp-field pp-phase-only"><span>Starts in month</span><input type="number" inputmode="numeric" class="form-control" data-m="startMonth" min="1" step="1"></label>
+          <label class="pp-field pp-phase-only"><span>For (months)</span><input type="number" inputmode="numeric" class="form-control" data-m="durationMonths" min="1" step="1"></label>
+        </div>
+        <div class="pp-member-foot"><span class="pp-tag" data-mout="tag"></span></div>
       </div>
-      <div class="pp-member-foot"><span class="pp-tag" data-mout="tag"></span><strong data-mout="total"></strong></div>
-    </div>`;
+    </details>`;
 }
 
 // ── RENDERING ────────────────────────────────────────────────────────────────
@@ -6252,7 +6376,9 @@ function refreshTeam() {
     const label = m.isAnim ? 'Animation' : PHASE_LABEL[phase];
     row.querySelector('[data-mout="tag"]').innerHTML =
       `<i class="pp-dot ${dot}"></i>${label} · M${start}–M${start + months - 1}`;
-    row.querySelector('[data-mout="total"]').textContent = on ? inr(m.salary * m.count * months) : 'Not counted';
+    row.querySelector('[data-mout="total"]').textContent = on ? inr(m.salary * m.count * months) : 'Off';
+    row.querySelector('[data-mout="name"]').textContent = m.role;
+    row.querySelector('[data-mout="meta"]').textContent = `${m.count} × ${inr(m.salary)}/mo · M${start}–M${start + months - 1}`;
   });
 }
 
@@ -6334,7 +6460,7 @@ function render() {
   out('sum-timeline', t.flatTeamCost > t.teamCost ? `Phasing saves ${inr(t.flatTeamCost - t.teamCost)}` : '');
   out('sum-audio', s.toggleAudio ? inr(t.audio) : 'Off');
   out('sum-overhead', [s.toggleOverhead ? inr(t.overheadMo) + '/mo' : '', s.toggleIpCharges ? 'IP ' + inr(t.ip) : ''].filter(Boolean).join(' · ') || 'Off');
-  out('sum-ai', s.toggleAi ? inr(t.ai.inr) : 'Off');
+  out('sum-ai', [s.toggleAi ? inr(t.ai.inr) : '', t.aiVo.on ? 'VO ' + inr(t.aiVo.inr) : ''].filter(Boolean).join(' · ') || 'Off');
 
   // Schedule
   out('scheduleHint', s.togglePreProd
@@ -6352,6 +6478,14 @@ function render() {
   // Audio
   out('musicHint', audioHint(s.musicMode, t.music, t));
   out('sfxHint', audioHint(s.sfxMode, t.sfx, t));
+  out('voHint', audioHint(s.voMode, t.vo, t));
+  if (!s.aiVoManual) s.aiVoMins = t.totalMins;
+  out('aiVoSuggest', s.aiVoManual ? `Use the content length instead (${t.totalMins} min)` : '');
+  outs.get('aiVoSuggest').forEach(el => { el.hidden = !s.aiVoManual; });
+  const v = t.aiVo;
+  out('aiVoHint', v.on
+    ? `${v.mins} min × ${v.takes} takes ≈ ${(v.credits / 1000).toLocaleString('en-IN')}k credits → ${v.plan.label} plan for ${plural(v.months, 'month')} = ${usd(v.usd)} (${inr(v.inr)}).`
+    : '');
 
   // Overhead
   out('overheadHint', s.toggleOverhead
@@ -6380,6 +6514,8 @@ function render() {
   out('lineAudio', inr(t.audio));
   out('lineIp', inr(t.ip));
   out('lineAi', inr(t.ai.inr));
+  out('lineAiVo', inr(t.aiVo.inr));
+  outs.get('lineAiVo').forEach(el => { el.parentElement.hidden = !t.aiVo.on; });
   out('lineCost', inr(t.baseCost));
   out('costSub', `${inrUnit(t.costPerMin)} per minute${t.isSeries && s.episodes > 0 ? ' · ' + inr(t.costPerEp) + ' per episode' : ''} · ${plural(t.dl, 'month')}`);
   out('commissionNote', t.commPct > 0
@@ -6625,6 +6761,13 @@ function onNumber(el, committed) {
       if (k === 'aiFootageMins') state.aiManualOverride = true;
       state[k] = v >= 0 ? v : 0;
       break;
+    case 'aiVoMins':
+      state.aiVoManual = true;
+      state.aiVoMins = v >= 0 ? v : 0;
+      break;
+    case 'aiVoTakes':
+      state.aiVoTakes = v >= 1 ? Math.floor(v) : 1;
+      break;
     case 'aiExchangeRate':
       state[k] = v > 0 ? v : 94;
       break;
@@ -6702,8 +6845,10 @@ function addMember() {
     existing.count += 1;
   } else {
     const tmpl = TEMPLATES.find(t => t.role === role) || { salary: 15000, isAnim: false };
+    const id = newMemberId();
+    openMembers.add(id);
     state.team.push(Object.assign({
-      id: newMemberId(), role, salary: tmpl.salary, count: 1, isAnim: tmpl.isAnim, enabled: true
+      id, role, salary: tmpl.salary, count: 1, isAnim: tmpl.isAnim, enabled: true
     }, defaultSchedule(state, role)));
   }
   rebuild();
@@ -6784,6 +6929,10 @@ function onClick(e) {
     case 'full-phases':
       state.team.forEach(m => { m.startMonth = 1; m.durationMonths = state.deadlineMonths; });
       rebuild();
+      break;
+    case 'aivo-suggest':
+      state.aiVoManual = false;
+      render();
       break;
     case 'ai-suggest':
       state.aiManualOverride = false;
@@ -6953,7 +7102,7 @@ function internalSheet(t) {
         ${part('Team total', inr(t.teamCost))}
         ${part('Overhead total', inr(t.overheadTotal), s.toggleOverhead ? `Space ${inr(t.spaceRent)} · PC ${inr(t.pcRent)} · Other ${inr(t.extra)}` : 'Overhead is off')}
         ${part('Audio (music + SFX)', inr(t.audio))}
-        ${part('IP and AI', inr(t.ip + t.ai.inr), `IP ${inr(t.ip)} · AI ${inr(t.ai.inr)}`, '#38bdf8')}
+        ${part('IP and AI', inr(t.ip + t.ai.inr + t.aiVo.inr), `IP ${inr(t.ip)} · AI ${inr(t.ai.inr)}${t.aiVo.on ? ' · VO ' + inr(t.aiVo.inr) : ''}`, '#38bdf8')}
       </div>
 
       ${(() => {
@@ -6978,6 +7127,7 @@ function internalSheet(t) {
 
 // ---- Client proposal (normal and detailed) ----
 const PROPOSAL_LINE = {
+  aivo:        { title: 'AI VO',                     sub: 'AI voice generation, at cost' },
   team:        { title: 'Production team',          sub: 'Pre-production to final render' },
   overhead:    { title: 'Studio overhead',           sub: 'Space, workstations and running costs' },
   audio:       { title: 'Music and sound design',    sub: 'Original score, SFX and mix' },
@@ -7243,6 +7393,12 @@ function initProductionPlan(parentAppState, parentSaveState) {
   root.addEventListener('input', onInput);
   root.addEventListener('change', onInput);
   root.addEventListener('click', onClick);
+  root.addEventListener('toggle', e => {
+    const d = e.target;
+    if (d.classList && d.classList.contains('pp-member')) {
+      if (d.open) openMembers.add(d.dataset.id); else openMembers.delete(d.dataset.id);
+    }
+  }, true);
 
   initialized = true;
   rebuild();
