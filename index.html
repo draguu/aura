@@ -3154,6 +3154,28 @@ textarea.form-control {
   margin-top: 2px;
 }
 
+.pp-addon {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-top: 4px;
+}
+
+.pp-addon strong {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.pp-split tr.addon-head td {
+  padding: 16px 0 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: left;
+}
+
 </style>
 </head>
 <body>
@@ -5470,6 +5492,7 @@ function defaults() {
     clientProfitPct: 30,
     clientAudioMarkupPct: 10,
     clientAudioAtCost: false,
+    audioSeparate: true,
     clientSalaryCapPct: 50,
     proposalMode: 'normal',
     quoteLines: {},
@@ -5690,7 +5713,7 @@ function countQuoteEdits(p) {
 
 // Round a client-facing rate down to a figure that looks natural
 function niceRate(v) {
-  const step = v >= 10000 ? 500 : v >= 1000 ? 100 : 10;
+  const step = v >= 10000 ? 500 : v >= 1000 ? 50 : 10;
   return Math.max(step, Math.floor(v / step) * step);
 }
 
@@ -5756,7 +5779,9 @@ function audioBreakdown(p, t, target, edited) {
 
 function clientSplit(p, t) {
   const askPct = Math.max(0, p.clientProfitPct || 0);
-  const total = Math.round(t.sell);
+  const sepAudio = !!t.audioSeparate;
+  const total = Math.round(sepAudio ? t.sellMain : t.sell);
+  const baseMain = Math.round(sepAudio ? t.baseCostMain : t.baseCost);
   const target = Math.round(total / (1 + askPct / 100)); // the subtotal we aim for
   const dl = t.dl;
   const ov = p.quoteLines || {};
@@ -5814,8 +5839,9 @@ function clientSplit(p, t) {
     detail: `${v.mins} min × ${splitPlural(v.takes, 'take', 'takes')} · ${splitPlural(v.months, 'month', 'months')}`,
     cost: v.inr, quote: aiVoQuote
   }] : [];
-  const room = target - Math.round(t.baseCost);
+  const room = target - baseMain;
   const audioTarget = has('audio') ? Math.round(ov.audio)
+    : sepAudio ? Math.round(t.audioPrice)
     : p.clientAudioAtCost ? Math.round(t.audio)
     : Math.round(t.audio) + (room > 0 ? Math.floor(Math.min(t.audio * Math.max(0, p.clientAudioMarkupPct || 0) / 100, room - 1)) : 0);
   const { items: audioItems, total: audioQuote } = audioBreakdown(p, t, audioTarget, has('audio'));
@@ -5845,7 +5871,8 @@ function clientSplit(p, t) {
   const overheadAuto = !has('overhead');
   const overheadFixed = overheadAuto ? 0 : Math.round(ov.overhead);
 
-  const forFlex = target - aiTotal - aiVoQuote - ipQuote - audioQuote - extrasTotal - rolesTotal - fixedTeam - overheadFixed;
+  const audioDeptTotal = sepAudio ? deptItems('audio').reduce((s, i) => s + i.quote, 0) : 0;
+  const forFlex = target - aiTotal - aiVoQuote - ipQuote - (sepAudio ? 0 : audioQuote) - (extrasTotal + rolesTotal - audioDeptTotal) - fixedTeam - overheadFixed;
   const scalableTeam = active.filter(m => !fixed(m)).reduce((s, m) => s + m.salary * m.count * months(m), 0);
   const scalable = scalableTeam + (overheadAuto ? t.overheadTotal : 0);
   const extra = forFlex - scalable;
@@ -5890,7 +5917,7 @@ function clientSplit(p, t) {
   const others = [
     { key: 'team', label: 'Team', cost: t.teamCost, quote: teamQuote, items: allTeam }
   ].concat(deptLines, [
-    { key: 'audio', label: 'Audio', cost: t.audio, quote: audioLineQuote, items: audioAll, edited: has('audio') || audioExtra.length > 0 },
+    { key: 'audio', label: 'Audio', cost: sepAudio ? 0 : t.audio, quote: sepAudio ? 0 : audioLineQuote, items: audioAll, edited: has('audio') || audioExtra.length > 0 },
     { key: 'ip', label: 'IP charges', cost: t.ip, quote: ipQuote, edited: has('ip') },
     { key: 'ai', label: 'AI', cost: t.ai.inr, quote: aiTotal, items: aiItems, edited: has('ai') },
     { key: 'aivo', label: 'AI VO', cost: v.inr, quote: aiVoQuote, items: aiVoItems, edited: has('aivo') }
@@ -5905,16 +5932,21 @@ function clientSplit(p, t) {
 
   const subtotal = lines.reduce((s, l) => s + l.quote, 0);
   const profit = total - subtotal;
+  // Audio as an optional add-on after the main total
+  const addon = sepAudio ? {
+    key: 'audio', label: 'Music and sound', cost: t.audio, quote: audioLineQuote, items: audioAll, edited: has('audio') || audioExtra.length > 0
+  } : null;
   return {
+    addon, grandTotal: total + (addon ? addon.quote : 0),
     askPct, lines, subtotal, total, profit, added, overheadAuto,
     exact: overheadAuto ? (target - subtotal >= 0 && target - subtotal < 10000 && (overheadQuote > 0 || subtotal === target)) : subtotal === target,
     edits: countQuoteEdits(p),
     showPct: subtotal > 0 ? (profit / subtotal) * 100 : 0,
     salaryRisePct: (factor - 1) * 100,
-    hidden: Math.max(0, subtotal - Math.round(t.baseCost)),
-    realProfit: t.sell - t.baseCost,
-    realPct: t.baseCost > 0 ? ((t.sell - t.baseCost) / t.baseCost) * 100 : 0,
-    belowCost: subtotal < Math.round(t.baseCost) - 1
+    hidden: Math.max(0, subtotal - baseMain),
+    realProfit: total - baseMain,
+    realPct: baseMain > 0 ? ((total - baseMain) / baseMain) * 100 : 0,
+    belowCost: subtotal < baseMain - 1
   };
 }
 
@@ -6021,7 +6053,17 @@ function compute(p) {
   // audio; IP and AI are passed through at cost.
   const baseCost = productionRun + audio + ip + ai.inr + aiVo.inr;
   const profitPct = p.toggleProfit ? p.profitPct : 0;
-  const sell = (productionRun + audio) * (1 + profitPct / 100) + ip + ai.inr + aiVo.inr;
+  // Audio can be quoted as a separate, optional add-on: it then gets its own
+  // markup instead of the profit margin, so dropping it never changes the
+  // margin on the main package.
+  const audioSeparate = !!p.audioSeparate && audio > 0;
+  const audioMarkup = p.clientAudioAtCost ? 0 : Math.max(0, p.clientAudioMarkupPct || 0);
+  const audioPrice = audioSeparate ? audio * (1 + audioMarkup / 100) : 0;
+  const sellMain = audioSeparate
+    ? productionRun * (1 + profitPct / 100) + ip + ai.inr + aiVo.inr
+    : (productionRun + audio) * (1 + profitPct / 100) + ip + ai.inr + aiVo.inr;
+  const baseCostMain = baseCost - (audioSeparate ? audio : 0);
+  const sell = sellMain + audioPrice;
   const profit = sell - baseCost;
   const commPct = p.toggleCommission ? p.commissionPct : 0;
   const commission = sell * (commPct / 100);
@@ -6043,6 +6085,8 @@ function compute(p) {
     spaceRent, pcRent, pcRentTotal, personMonths, extra, overheadMo, overheadTotal, burnMo, productionRun,
     music, songs, sfx, mix, vo, audio, ip, ai, aiVo,
     baseCost, profitPct, sell, profit, commPct, commission, net: sell - commission,
+    audioSeparate, audioPrice, sellMain, baseCostMain,
+    sellMainPerEp: perEp(sellMain), sellMainPerMin: perMin(sellMain),
     costPerEp: perEp(baseCost), sellPerEp: perEp(sell),
     costPerMin: perMin(baseCost), sellPerMin: perMin(sell),
     productionStart: productionStart(p),
@@ -6234,6 +6278,13 @@ function shellHtml() {
 
   const audio = `
     <div class="pp-row"><span class="pp-row-title">Include audio in the cost</span>${sw('toggleAudio', 'Include audio in the cost')}</div>
+    <div class="pp-block" data-dim="toggleAudio">
+      <div class="pp-row"><span class="pp-row-title">Quote audio separately</span>${sw('audioSeparate', 'Quote audio separately as an optional add-on')}</div>
+      <div class="pp-hint">Audio is shown as an optional add-on after the main total, with its own markup. If the client drops it, your profit margin on the main package stays the same.</div>
+      <div class="pp-fields" data-dim="audioSeparate">
+        ${num('clientAudioMarkupPct', 'Markup on audio (%)', 'min="0" step="1"')}
+      </div>
+    </div>
     <div class="pp-two" data-dim="toggleAudio">
       ${audioBlock('Background score', 'music', 'toggleMusic')}
       <div class="pp-block">
@@ -6336,6 +6387,7 @@ function shellHtml() {
         </div>
         <div class="pp-big" data-out="sell"></div>
         <div class="pp-exact" data-out="sellExact"></div>
+        <div class="pp-addon" data-out="sellAddon"></div>
         <div class="pp-hint" data-out="sellSub"></div>
       </div>
       <div class="pp-kpis">
@@ -6659,9 +6711,9 @@ function render() {
   out('aiHint', `Video ${usd(a.videoUsd)} + subscriptions ${usd(a.subsUsd)} = ${usd(a.usd)}, which is ${inr(a.inr)}. Credits are priced at $${AI_PACKAGE.usd} for ${AI_PACKAGE.credits.toLocaleString('en-IN')}.`);
 
   // Summary
-  out('sell', inr(t.sell));
-  out('sellExact', inrFull(t.sell));
-  out('sellSub', `${inrUnit(t.sellPerMin)} per minute${t.isSeries && s.episodes > 0 ? ' · ' + inr(t.sellPerEp) + ' per episode' : ''}`);
+  out('sell', inr(t.sellMain));
+  out('sellExact', inrFull(t.sellMain));
+  out('sellSub', `${inrUnit(t.sellMainPerMin)} per minute${t.isSeries && s.episodes > 0 ? ' · ' + inr(t.sellMainPerEp) + ' per episode' : ''}${t.audioSeparate ? ', without audio' : ''}`);
   out('cost', inr(t.baseCost));
   out('profit', inr(t.profit));
   out('burn', inr(t.burnMo));
@@ -6693,10 +6745,13 @@ function render() {
   }
 
   out('barCost', inr(t.baseCost));
-  out('barSell', inr(t.sell));
+  out('barSell', inr(t.sellMain));
 
   const sp = clientSplit(s, t);
-  const rowsHtml = sp.lines.map(l => {
+  out('sellAddon', sp.addon
+    ? `+ Audio add-on (optional) <strong>${inrFull(sp.addon.quote)}</strong><br>With audio <strong>${inrFull(sp.grandTotal)}</strong>`
+    : '', true);
+  const rowHtml = l => {
     if (!l.items || !l.items.length) {
       return `<tr><td>${esc(l.label)}</td><td>${l.cost > 0 ? inr(l.cost) : '—'}</td><td${l.edited ? ' class="ed"' : ''}>${inr(l.quote)}</td></tr>`;
     }
@@ -6707,11 +6762,16 @@ function render() {
     const items = open ? l.items.map(i =>
       `<tr class="item"><td><div>${esc(i.label)}</div><small>${i.short || i.detail}</small></td><td>${i.cost > 0 ? inr(i.cost) : '—'}</td><td${i.edited ? ' class="ed"' : ''}>${inr(i.quote)}</td></tr>`).join('') : '';
     return head + items;
-  }).join('');
+  };
+  const rowsHtml = sp.lines.map(rowHtml).join('');
+  const addonHtml = sp.addon
+    ? `<tr class="addon-head"><td colspan="3">Optional add-on</td></tr>` + rowHtml(sp.addon) +
+      `<tr class="total"><td>Total with audio</td><td>${inr(t.sell)}</td><td>${inr(sp.grandTotal)}</td></tr>`
+    : '';
   out('splitRows', rowsHtml +
-    `<tr class="sub"><td>Subtotal</td><td>${inr(t.baseCost)}</td><td>${inr(sp.subtotal)}</td></tr>` +
+    `<tr class="sub"><td>Subtotal</td><td>${inr(t.baseCostMain)}</td><td>${inr(sp.subtotal)}</td></tr>` +
     `<tr class="profit"><td>Profit (${pct(Math.round(sp.showPct))})</td><td>${inr(sp.realProfit)}</td><td>${inr(sp.profit)}</td></tr>` +
-    `<tr class="total"><td>Total</td><td>${inr(t.sell)}</td><td>${inr(sp.total)}</td></tr>`, true);
+    `<tr class="total"><td>${sp.addon ? 'Total without audio' : 'Total'}</td><td>${inr(t.sellMain)}</td><td>${inr(sp.total)}</td></tr>` + addonHtml, true);
   const editsNote = sp.edits ? ' Amounts you edited are in purple.' : '';
   out('splitNote', t.baseCost <= 0 && !sp.edits ? '' : !sp.exact && sp.realPct < sp.askPct
     ? `<span class="warn">Your real profit is only ${pct(sp.realPct)} on costs, so the quote can't show ${pct(sp.askPct)}.</span> Founder salaries, AI and IP stay at real cost, so the most it can show is ${pct(Math.round(sp.showPct * 10) / 10)}. Raise your profit margin or lower the profit shown.`
@@ -6721,7 +6781,7 @@ function render() {
     : sp.belowCost
       ? `<span class="warn">This shows more profit than you actually make (${pct(sp.realPct)} on costs), so the quote lines add up to less than your real costs.</span>`
       : `Your real profit is <strong>${pct(sp.realPct)}</strong> on costs. ${inr(sp.hidden)} is placed in the quote${Math.round(sp.salaryRisePct) > 0 ? ': salaries up ' + pct(Math.round(sp.salaryRisePct)) + ',' : ':'}` +
-        `${sp.added.length ? ' ' + sp.added.map(i => i.label + (i.count > 1 ? ' (' + i.count + ')' : '')).join(' and ') + ' added to the team,' : ''} the rest in ${[sp.overheadAuto ? 'overhead' : '', state.quoteLines.audio === undefined && !state.clientAudioAtCost ? 'audio' : ''].filter(Boolean).join(' and ') || 'the profit line'}.${editsNote}`, true);
+        `${sp.added.length ? ' ' + sp.added.map(i => i.label + (i.count > 1 ? ' (' + i.count + ')' : '')).join(' and ') + ' added to the team,' : ''} the rest in ${[sp.overheadAuto ? 'overhead' : '', state.quoteLines.audio === undefined && !state.clientAudioAtCost && !t.audioSeparate ? 'audio' : ''].filter(Boolean).join(' and ') || 'the profit line'}.${editsNote}`, true);
   out('qeditSum', sp.edits ? plural(sp.edits, 'edit') : '');
   refreshQuoteEditor(sp);
 
@@ -7246,7 +7306,7 @@ function internalSheet(t) {
 
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px;">
         ${kpi('Base production cost', inr(t.baseCost), '#f59e0b', `${inrUnit(t.costPerMin)} / min`)}
-        ${kpi('Target selling price', inr(t.sell), '#38bdf8', `${inrUnit(t.sellPerMin)} / min`)}
+        ${kpi('Target selling price', inr(t.sellMain), '#38bdf8', t.audioSeparate ? `+ audio add-on ${inr(t.audioPrice)}` : `${inrUnit(t.sellPerMin)} / min`)}
         ${kpi(`Project profit (${t.profitPct}%)`, inr(t.profit), '#10b981', 'Margin markup')}
         ${kpi('Monthly burn rate', inr(t.burnMo), '#ffffff', `Team ${inr(t.teamMo)} + overhead ${inr(t.overheadMo)}`)}
       </div>
@@ -7361,8 +7421,8 @@ function clientSheet(t) {
     </div>`;
 
   const perUnit = [
-    t.isSeries && s.episodes > 0 ? `${inr(t.sellPerEp)} per episode` : '',
-    `${inrUnit(t.sellPerMin)} per minute`
+    t.isSeries && s.episodes > 0 ? `${inr(t.sellMainPerEp)} per episode` : '',
+    `${inrUnit(t.sellMainPerMin)} per minute`
   ].filter(Boolean).join(' · ');
 
   return `
@@ -7404,11 +7464,22 @@ function clientSheet(t) {
 
         <div style="margin-top:16px;background:${P.ink};border-radius:12px;padding:22px 26px;display:flex;justify-content:space-between;align-items:center;gap:16px;">
           <div>
-            <div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:${P.faint};">Total project investment</div>
+            <div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:${P.faint};">Total project investment${sp.addon ? ' (without audio)' : ''}</div>
             <div style="font-size:12px;color:#cbd5e1;margin-top:6px;">${perUnit}</div>
           </div>
           <div style="font-size:30px;font-weight:800;letter-spacing:-0.5px;color:#ffffff;font-variant-numeric:tabular-nums;">${inrFull(sp.total)}</div>
         </div>
+
+        ${sp.addon ? `
+        <div style="margin-top:30px;">
+          <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:${P.faint};">Optional add-on</div>
+          <div style="font-size:12px;color:${P.muted};margin:4px 0 6px;">Priced separately. Removing it does not change the project total above.</div>
+          ${section(sp.addon, sp.lines.length)}
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:16px;border-top:2px solid ${P.ink};padding-top:14px;margin-top:2px;">
+            <span style="font-size:14px;font-weight:700;color:${P.ink};">Total with audio</span>
+            <span style="font-size:20px;font-weight:800;color:${P.ink};font-variant-numeric:tabular-nums;">${inrFull(sp.grandTotal)}</span>
+          </div>
+        </div>` : ''}
 
         <div style="margin-top:22px;font-size:11px;color:${P.faint};line-height:1.6;">
           All amounts in INR. Taxes extra as applicable. Timeline starts on signing and receipt of the advance.
